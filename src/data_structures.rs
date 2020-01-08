@@ -171,7 +171,7 @@ impl<'a, T> Iterator for SetIter<'a, T> {
 //   for ent in startEnt .. endPlus1Ent {
 //   }
 
-trait PlusOne {
+pub trait PlusOne {
     fn plus_one(&self) -> Self;
 }
 
@@ -285,7 +285,7 @@ macro_rules! generate_boilerplate {
         pub fn $mkTypeIx(n: u32) -> $TypeIx { $TypeIx::$TypeIx(n) }
         impl $TypeIx {
             pub fn get(self) -> u32 { match self { $TypeIx::$TypeIx(n) => n } }
-            fn get_usize(self) -> usize { self.get() as usize }
+            pub fn get_usize(self) -> usize { self.get() as usize }
             pub fn plus(self, delta: u32) -> $TypeIx {
                 $TypeIx::$TypeIx(self.get() + delta)
             }
@@ -1336,6 +1336,10 @@ pub struct SortedFragIxs {
 impl SortedFragIxs {
     fn show(&self) -> String {
         self.fragIxs.show()
+    }
+
+    pub fn len(&self) -> usize {
+        self.fragIxs.len()
     }
 
     pub fn show_with_fenv(&self, fenv: &Vec_Frag) -> String {
