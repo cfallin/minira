@@ -11,6 +11,30 @@
 //! Backtracking register allocator on SSA code ported from IonMonkey's
 //! BacktrackingAllocator.
 
+/*
+ * TODO:
+ * - Compute liveness info (`buildLivenessInfo()`)
+ * - mergeAndQueueRegisters
+ * - processBundle
+ * - splits
+ * - eviction
+ * - move insertion (`resolveControlFlow()`)
+ *   - "movegroup" instruction?
+ * - regalloc fuzzer: generate valid SSA
+ *   - simple approach: phi for every local in every block?
+ *   - two "modes" per local: the above, or def in entry block
+ *     and use elsewhere?
+ * - hook up checker
+ *   - handle phis/movegroups
+ *
+ * - modify CL to generate SSA VCode
+ *   - lower phis to phis directly
+ *   - movegroup impl with scratch regs
+ *   - use temps properly (`alloc_tmp()` vs `alloc_reg()`)
+ *
+ * - produce stackmaps
+ */
+
 #![allow(dead_code, unused_imports)]
 
 use crate::{
@@ -350,8 +374,12 @@ impl<'a, F: Function> Env<'a, F> {
     }
 
     pub(crate) fn init(&mut self) -> Result<(), RegAllocError> {
+        // Initialize uses, defs, and regs.
+
+
+        // Initialize hot_code to contain inner loops only.
+
         Ok(())
-        // TODO: 
     }
 }
 
