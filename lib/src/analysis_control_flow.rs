@@ -309,43 +309,6 @@ fn calc_dom_sets_slow(
 //=============================================================================
 // Computation of per-block dominator sets by first computing trees.
 //
-// This is an implementation of the algorithm described in
-//
-//   A Simple, Fast Dominance Algorithm
-//   Keith D. Cooper, Timothy J. Harvey, and Ken Kennedy
-//   Department of Computer Science, Rice University, Houston, Texas, USA
-//   TR-06-33870
-//   https://www.cs.rice.edu/~keith/EMBED/dom.pdf
-//
-// which appears to be the de-facto standard scheme for computing dominance
-// quickly nowadays.
-
-// Unfortunately it seems like local consts are not allowed in Rust.
-const DT_INVALID_POSTORD: u32 = 0xFFFF_FFFF;
-const DT_INVALID_BLOCKIX: BlockIx = BlockIx::BlockIx(0xFFFF_FFFF);
-
-// Helper
-fn dt_merge_sets(
-    idom: &TypedIxVec<BlockIx, BlockIx>,
-    bix2rpostord: &TypedIxVec<BlockIx, u32>,
-    mut node1: BlockIx,
-    mut node2: BlockIx,
-) -> BlockIx {
-    while node1 != node2 {
-        if node1 == DT_INVALID_BLOCKIX || node2 == DT_INVALID_BLOCKIX {
-            return DT_INVALID_BLOCKIX;
-        }
-        let rpo1 = bix2rpostord[node1];
-        let rpo2 = bix2rpostord[node2];
-        if rpo1 > rpo2 {
-            node1 = idom[node1];
-        } else if rpo2 > rpo1 {
-            node2 = idom[node2];
-        }
-    }
-    assert!(node1 == node2);
-    node1
-}
 
 #[inline(never)]
 fn calc_dom_tree(
@@ -354,106 +317,12 @@ fn calc_dom_tree(
     post_ord: &Vec<BlockIx>,
     start: BlockIx,
 ) -> TypedIxVec<BlockIx, BlockIx> {
-    info!("        calc_dom_tree: begin");
-
-    // We use 2^32-1 as a marker for an invalid BlockIx or postorder number.
-    // Hence we need this:
-    assert!(num_blocks < DT_INVALID_POSTORD);
-
-    // We have post_ord, which is the postorder sequence.
-
-    // Compute bix2rpostord, which maps a BlockIx to its reverse postorder
-    // number.  And rpostord2bix, which maps a reverse postorder number to its
-    // BlockIx.
-    let mut bix2rpostord = TypedIxVec::<BlockIx, u32>::new();
-    let mut rpostord2bix = Vec::<BlockIx>::new();
-    bix2rpostord.resize(num_blocks, DT_INVALID_POSTORD);
-    rpostord2bix.resize(num_blocks as usize, DT_INVALID_BLOCKIX);
-    for n in 0..num_blocks {
-        // bix visits the blocks in reverse postorder
-        let bix = post_ord[(num_blocks - 1 - n) as usize];
-        // Hence:
-        bix2rpostord[bix] = n;
-        // and
-        rpostord2bix[n as usize] = bix;
-    }
-    for n in 0..num_blocks {
-        debug_assert!(bix2rpostord[BlockIx::new(n)] < num_blocks);
-    }
-
-    let mut idom = TypedIxVec::<BlockIx, BlockIx>::new();
-    idom.resize(num_blocks, DT_INVALID_BLOCKIX);
-
-    // The start node must have itself as a parent.
-    idom[start] = start;
-
-    for i in 0..num_blocks {
-        let block_ix = BlockIx::new(i);
-        let preds_of_i = &pred_map[block_ix];
-        // All nodes must be reachable from the root.  That means that all nodes
-        // that aren't `start` must have at least one predecessor.  However, we
-        // can't assert the inverse case -- that the start node has no
-        // predecessors -- because the start node might be a self-loop, in which
-        // case it will have itself as a pred.  See tests/domtree_fuzz1.rat.
-        if block_ix != start {
-            assert!(!preds_of_i.is_empty());
-        }
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for n in 0..num_blocks {
-            // Consider blocks in reverse postorder.
-            let node = rpostord2bix[n as usize];
-            assert!(node != DT_INVALID_BLOCKIX);
-            let node_preds = &pred_map[node];
-            let rponum = bix2rpostord[node];
-
-            let mut parent = DT_INVALID_BLOCKIX;
-            if node_preds.is_empty() {
-                // No preds, `parent` remains invalid.
-            } else {
-                for pred in node_preds.iter() {
-                    let pred_rpo = bix2rpostord[*pred];
-                    if pred_rpo < rponum {
-                        parent = *pred;
-                        break;
-                    }
-                }
-            }
-
-            if parent != DT_INVALID_BLOCKIX {
-                for pred in node_preds.iter() {
-                    if *pred == parent {
-                        continue;
-                    }
-                    if idom[*pred] == DT_INVALID_BLOCKIX {
-                        continue;
-                    }
-                    parent = dt_merge_sets(&idom, &bix2rpostord, parent, *pred);
-                }
-            }
-
-            if parent != DT_INVALID_BLOCKIX && parent != idom[node] {
-                idom[node] = parent;
-                changed = true;
-            }
-        }
-    }
-
-    // Check what we can.  The start node should be its own parent.  All other
-    // nodes should not be their own parent, since we are assured that there are
-    // no dead blocks in the graph, and hence that there is only one dominator
-    // tree, that covers the whole graph.
-    assert!(idom[start] == start);
-    for i in 0..num_blocks {
-        let block_ix = BlockIx::new(i);
-        // All "parent pointers" are valid.
-        assert!(idom[block_ix] != DT_INVALID_BLOCKIX);
-        // The only node whose parent pointer points to itself is the start node.
-        assert!((idom[block_ix] == block_ix) == (block_ix == start));
-    }
+    let idom = crate::domtree::calculate(
+        num_blocks,
+        |pred| pred_map[pred].to_vec().into(),
+        &post_ord[..],
+        start,
+    );
 
     if CROSSCHECK_DOMS {
         // Crosscheck the dom tree, by computing dom sets using the simple
@@ -481,7 +350,6 @@ fn calc_dom_tree(
         info!("        calc_dom_tree crosscheck: end");
     }
 
-    info!("        calc_dom_tree: end");
     idom
 }
 

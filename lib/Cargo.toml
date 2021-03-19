@@ -3,7 +3,7 @@ name = "regalloc"
 version = "0.0.31"
 authors = ["The Regalloc.rs Developers"]
 edition = "2018"
-license = "Apache-2.0 WITH LLVM-exception"
+license = "Apache-2.0 WITH LLVM-exception AND MPL-2.0"
 description = "Modular register allocation algorithms"
 repository = "https://github.com/bytecodealliance/regalloc.rs"
 

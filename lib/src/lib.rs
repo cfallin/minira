@@ -24,7 +24,9 @@ mod bt_spillslot_allocator;
 mod bt_vlr_priority_queue;
 mod checker;
 mod data_structures;
+mod domtree;
 mod inst_stream;
+mod ion;
 mod linear_scan;
 mod pretty_print;
 mod reg_maps;
@@ -187,6 +189,19 @@ pub trait Function {
     /// type F::Inst.
     type Inst: Clone + fmt::Debug;
 
+    /// Is this an SSA function?
+    ///
+    /// If so, the following properties are true:
+    ///
+    /// - The function may use phi instructions (`is_phi()` below).
+    /// - The function's instructions must define each VReg at most
+    ///   once, and must not use RRegs. Furthermore, "mod"s are
+    ///   disallowed.
+    /// - In place of RRegs, the function should use constraints.
+    fn is_ssa(&self) -> bool {
+        false
+    }
+
     // -------------
     // CFG traversal
     // -------------
@@ -221,6 +236,12 @@ pub trait Function {
     /// Get CFG successors for a given block.
     fn block_succs(&self, block: BlockIx) -> Cow<[BlockIx]>;
 
+    /// Get the CFG predecessors for a given block. Required only for
+    /// SSA functions.
+    fn block_preds(&self, block: BlockIx) -> Cow<[BlockIx]> {
+        Cow::Borrowed(&[])
+    }
+
     /// Determine whether an instruction is a return instruction.
     fn is_ret(&self, insn: InstIx) -> bool;
 
@@ -251,6 +272,12 @@ pub trait Function {
     /// instruction.
     fn get_regs(insn: &Self::Inst, collector: &mut RegUsageCollector);
 
+    /// Get the RegSlotInfos for each slot in the instruction. SSA functions
+    /// use this rather than `get_regs()` above to provide information.
+    fn get_reg_slot_info(&self, iix: InstIx) -> Cow<[RegSlotInfo]> {
+        Cow::Borrowed(&[])
+    }
+
     /// Map each register slot through a virtual-to-real mapping indexed
     /// by virtual register. The two separate maps in `maps.pre` and
     /// `maps.post` provide the mapping to use for uses (which semantically
@@ -265,6 +292,14 @@ pub trait Function {
 
     /// Allow the regalloc to query whether this is a move. Returns (dst, src).
     fn is_move(&self, insn: &Self::Inst) -> Option<(Writable<Reg>, Reg)>;
+
+    /// Allow the regalloc to query whether this is an SSA phi instruction.
+    /// Returns a list of source `Reg`s (which must be SSA Values) if so, with
+    /// the list corresponding one-to-one with the list returned by
+    /// `block_preds()`.
+    fn is_phi<'a>(&self, iix: InstIx) -> Option<PhiInfo<'a>> {
+        None
+    }
 
     /// Get the precise number of `VirtualReg` in use in this function, to allow preallocating data
     /// structures. This number *must* be a correct lower-bound, otherwise invalid index failures
@@ -360,6 +395,46 @@ pub trait Function {
     fn func_liveouts(&self) -> Set<RealReg>;
 }
 
+/// Inputs to a phi-node in SSA code.
+#[derive(Clone, Debug)]
+pub struct PhiInfo<'a> {
+    /// Inputs to the phi: each input corresopnds one-to-one to a predecessor in `block_preds()`
+    /// for this block.
+    inputs: Cow<'a, [Reg]>,
+}
+
+/// For SSA functions: info for one "slot" in an instruction: this is a mention of a register,
+/// either as a def or use. (This corresponds to an `Allocation` in IonMonkey's allocator.)
+#[derive(Clone, Debug)]
+pub struct RegSlotInfo {
+    kind: RegSlotKind,
+    constraint: RegSlotConstraint,
+    vreg: VirtualReg,
+    allocated: RegSlotLoc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegSlotKind {
+    Def,
+    Use,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegSlotConstraint {
+    AnyReg,
+    AnyRegOrConst,
+    Fixed(RealReg),
+    Stack,
+    None,
+}
+
+#[derive(Clone, Debug)]
+pub enum RegSlotLoc {
+    Reg(RealReg),
+    Stack(SpillSlot),
+    None,
+}
+
 /// The result of register allocation.  Note that allocation can fail!
 pub struct RegAllocResult<F: Function> {
     /// A new sequence of instructions with all register slots filled with real
@@ -411,6 +486,7 @@ pub struct RegAllocResult<F: Function> {
 pub enum AlgorithmWithDefaults {
     Backtracking,
     LinearScan,
+    Ion,
 }
 
 pub use crate::analysis_main::AnalysisError;
@@ -422,6 +498,8 @@ pub enum RegAllocError {
     OutOfRegisters(RegClass),
     MissingSuggestedScratchReg(RegClass),
     Analysis(AnalysisError),
+    /// SSA invariant broken for given vreg at given instruction.
+    SSA(VirtualReg, InstIx),
     RegChecker(CheckerErrors),
     Other(String),
 }
@@ -435,19 +513,11 @@ impl fmt::Display for RegAllocError {
 pub use crate::bt_main::BacktrackingOptions;
 pub use crate::linear_scan::LinearScanOptions;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Algorithm {
     LinearScan(LinearScanOptions),
     Backtracking(BacktrackingOptions),
-}
-
-impl fmt::Debug for Algorithm {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Algorithm::LinearScan(opts) => write!(fmt, "{:?}", opts),
-            Algorithm::Backtracking(opts) => write!(fmt, "{:?}", opts),
-        }
-    }
+    Ion,
 }
 
 /// Tweakable options shared by all the allocators.
@@ -597,6 +667,7 @@ pub fn allocate_registers_with_opts<F: Function>(
         Algorithm::LinearScan(opts) => {
             linear_scan::run(func, rreg_universe, stackmap_info, run_checker, opts)
         }
+        Algorithm::Ion => ion::run(func, rreg_universe),
     };
 
     info!("================ regalloc.rs: END function ================");
@@ -626,6 +697,7 @@ pub fn allocate_registers<F: Function>(
     let algorithm = match algorithm {
         AlgorithmWithDefaults::Backtracking => Algorithm::Backtracking(Default::default()),
         AlgorithmWithDefaults::LinearScan => Algorithm::LinearScan(Default::default()),
+        AlgorithmWithDefaults::Ion => Algorithm::Ion,
     };
     let opts = Options {
         algorithm,
