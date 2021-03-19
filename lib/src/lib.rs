@@ -407,16 +407,25 @@ pub struct PhiInfo<'a> {
 /// either as a def or use. (This corresponds to an `Allocation` in IonMonkey's allocator.)
 #[derive(Clone, Debug)]
 pub struct RegSlotInfo {
-    kind: RegSlotKind,
-    constraint: RegSlotConstraint,
-    vreg: VirtualReg,
-    allocated: RegSlotLoc,
+    pub kind: RegSlotKind,
+    pub constraint: RegSlotConstraint,
+    pub vreg: VirtualReg,
+    pub allocated: RegSlotLoc,
 }
 
+/// The "kind" of a register slot: the sense in which it mentions the register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegSlotKind {
+    /// Definition occurring at end of instruction. (That is, allocated register
+    /// might overlap with a use of the same instruciton.)
     Def,
+    /// Use occurring at beginning of instruction. (That is, allocated register
+    /// might overlap with a def of the same instruction.)
     Use,
+    /// Temporary register: semantically a def, but cannot be used elsewhere;
+    /// live at both use-point and def-point of instruction (and so will not
+    /// overlap with either uses or defs.) 
+    Temp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

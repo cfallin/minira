@@ -22,6 +22,7 @@ use smallvec::{smallvec, SmallVec};
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
+mod cfg;
 mod binheap;
 mod postorder;
 mod splay;
@@ -33,67 +34,13 @@ pub(crate) trait ContainerComparator {
     fn compare(&self, a: Self::Ix, b: Self::Ix) -> Ordering;
 }
 
-struct CFGInfo {
-    postorder: Vec<BlockIx>,
-    domtree: TypedIxVec<BlockIx, BlockIx>,
-    insn_block: TypedIxVec<InstIx, BlockIx>,
-    def: Vec</* VirtualReg index, */ InstIx>,
-}
-
-impl CFGInfo {
-    fn new<F: Function>(f: &F) -> CFGInfo {
-        assert!(f.is_ssa());
-
-        let postorder = postorder::calculate(f);
-        let domtree = domtree::calculate(
-            f.blocks().len() as u32,
-            |block| f.block_preds(block),
-            &postorder[..],
-            f.entry_block(),
-        );
-        let mut insn_block = TypedIxVec::new();
-        insn_block.resize(f.insns().len() as u32, BlockIx::invalid_value());
-        let mut def = vec![InstIx::invalid_value(); f.get_num_vregs()];
-
-        for bix in f.blocks() {
-            for iix in f.block_insns(bix) {
-                insn_block[iix] = bix;
-                for slot in f.get_reg_slot_info(iix).iter() {
-                    if slot.kind == RegSlotKind::Def {
-                        def[slot.vreg.get_index()] = iix;
-                    }
-                }
-            }
-        }
-
-        CFGInfo {
-            postorder,
-            domtree,
-            insn_block,
-            def,
-        }
-    }
-
-    fn dominates(&self, a: BlockIx, mut b: BlockIx) -> bool {
-        loop {
-            if a == b {
-                return true;
-            }
-            if b.is_invalid() {
-                return false;
-            }
-            b = self.domtree[b];
-        }
-    }
-}
-
 #[cfg(not(debug))]
-fn validate_ssa<F: Function>(_: &F, _: &CFGInfo) -> Result<(), RegAllocError> {
+fn validate_ssa<F: Function>(_: &F, _: &cfg::CFGInfo) -> Result<(), RegAllocError> {
     Ok(())
 }
 
 #[cfg(debug)]
-fn validate_ssa<F: Function>(f: &F, cfginfo: &CFGInfo) -> Result<(), RegAllocError> {
+fn validate_ssa<F: Function>(f: &F, cfginfo: &cfg::CFGInfo) -> Result<(), RegAllocError> {
     // Walk the blocks in RPO. We should see every def before any uses, aside from phi inputs.
     let mut defined = vec![f.num_vregs(); false];
     for block in cfginfo.postorder.iter().rev() {
@@ -145,10 +92,27 @@ pub(crate) enum CodePosition {
 }
 
 /// A range from `from` (inclusive) to `to` (exclusive).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CodeRange {
     from: CodePosition,
     to: CodePosition,
+}
+
+impl std::cmp::PartialOrd for CodeRange {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl std::cmp::Ord for CodeRange {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self.to <= other.from {
+            Ordering::Less
+        } else if self.from >= other.to {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }
 }
 
 macro_rules! define_index {
@@ -179,6 +143,7 @@ define_index!(SpillSetIndex);
 define_index!(UseIndex);
 define_index!(DefIndex);
 define_index!(VRegIndex);
+define_index!(PrioQueueIndex);
 
 #[derive(Clone, Debug)]
 struct LiveRange {
@@ -268,15 +233,44 @@ struct PReg {
  */
 
 #[derive(Clone, Debug)]
-struct Env {
+struct Env<'a, F: Function> {
+    func: &'a F,
+    cfginfo: cfg::CFGInfo,
+    rru: &'a RealRegUniverse,
+
     ranges: Vec<LiveRange>,
     bundles: Vec<LiveBundle>,
     spillsets: Vec<SpillSet>,
     uses: Vec<Use>,
     defs: Vec<Def>,
     regs: Vec<VReg>,
-    queue: binheap::BinHeap<LiveBundleIndex>,
-    // TODO: rest of fields of BacktrackingAllocator
+    allocation_queue: PrioQueue,
+    stackslot_allocator: StackSlotAllocator,
+    hot_code: LiveRangeSet,
+    calls: Vec<CodePosition>,  // sorted list
+    slots_single: Vec<usize>,
+    slots_double: Vec<usize>,
+    slots_quad: Vec<usize>,
+    spilled_bundles: Vec<LiveBundleIndex>,
+}
+
+#[derive(Clone, Debug)]
+struct PrioQueue {
+    items: Vec<PrioQueueItem>,
+    heap: binheap::BinHeap<PrioQueueIndex>,
+}
+
+#[derive(Clone, Debug)]
+struct PrioQueueItem {
+    bundle: LiveBundleIndex,
+    prio: usize,
+}
+
+#[derive(Clone, Debug)]
+struct StackSlotAllocator {
+    height: usize,
+    normal_slots: Vec<usize>,
+    double_slots: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -298,11 +292,66 @@ impl<'a> ContainerComparator for LiveRangeCmp<'a> {
     }
 }
 
-impl Env {
-    fn lr_cmp<'a>(&'a self) -> LiveRangeCmp<'a> {
+impl PrioQueue {
+    fn new() -> Self {
+        PrioQueue {
+            items: vec![],
+            heap: binheap::BinHeap::new(),
+        }
+    }
+}
+
+impl StackSlotAllocator {
+    pub(crate) fn new() -> Self {
+        StackSlotAllocator {
+            height: 0,
+            normal_slots: vec![],
+            double_slots: vec![],
+        }
+    }
+}
+
+impl LiveRangeSet {
+    pub(crate) fn new() -> Self {
+        Self {
+            splay_tree: splay::SplayTree::new(),
+        }
+    }
+}
+
+impl<'a, F: Function> Env<'a, F> {
+    pub(crate) fn new(func: &'a F, rru: &'a RealRegUniverse, cfginfo: cfg::CFGInfo) -> Self {
+        Self {
+            func,
+            rru,
+            cfginfo,
+
+            bundles: vec![],
+            ranges: vec![],
+            spillsets: vec![],
+            uses: vec![],
+            defs: vec![],
+            regs: vec![],
+            allocation_queue: PrioQueue::new(),
+            stackslot_allocator: StackSlotAllocator::new(),
+            calls: vec![],
+            hot_code: LiveRangeSet::new(),
+            slots_single: vec![],
+            slots_double: vec![],
+            slots_quad: vec![],
+            spilled_bundles: vec![],
+        }
+    }
+
+    fn lr_cmp<'b>(&'b self) -> LiveRangeCmp<'b> {
         LiveRangeCmp {
             ranges: &self.ranges[..],
         }
+    }
+
+    pub(crate) fn init(&mut self) -> Result<(), RegAllocError> {
+        Ok(())
+        // TODO: 
     }
 }
 
@@ -310,8 +359,11 @@ pub(crate) fn run<F: Function>(
     func: &F,
     rru: &RealRegUniverse,
 ) -> Result<RegAllocResult<F>, RegAllocError> {
-    let cfginfo = CFGInfo::new(func);
+    let cfginfo = cfg::CFGInfo::new(func);
     validate_ssa(func, &cfginfo)?;
+
+    let mut env = Env::new(func, rru, cfginfo);
+    env.init()?;
 
     Err(RegAllocError::Other("unimplemented".into()))
 }
