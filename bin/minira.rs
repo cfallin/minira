@@ -222,7 +222,7 @@ fn run_snapshot(path: &str, opts: Options, quiet: bool) {
                 }
             }
             Ok(())
-        };
+        }
 
         visit_dirs(path, quiet, &mut snapshots, &mut deserialize_one)
             .expect("couldn't read at least one directory entry");
@@ -633,7 +633,9 @@ fn lsra_qsort_18() {
 fn lsra_critical_edge_invariant() {
     assert!(matches!(
         test_utils::run_lsra("lsra_invariant_incorrect", 5, 0),
-        Err(regalloc::RegAllocError::Analysis(regalloc::AnalysisError::LsraCriticalEdge { .. }))
+        Err(regalloc::RegAllocError::Analysis(
+            regalloc::AnalysisError::LsraCriticalEdge { .. }
+        ))
     ));
 }
 

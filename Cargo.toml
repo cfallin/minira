@@ -30,6 +30,10 @@ clap = "2.33.0"
 serde = "1.0.94"
 bincode = "1.2.1"
 
+[dev-dependencies]
+criterion = "0.3"
+rand = "0.8"
+
 [profile.release]
 debug = true
 
@@ -37,3 +41,7 @@ debug = true
 debug = true
 debug-assertions = true
 overflow-checks = true
+
+[[bench]]
+name = "regalloc"
+harness = false
