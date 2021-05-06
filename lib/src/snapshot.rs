@@ -107,7 +107,7 @@ impl IRSnapshot {
             let mut handle_reg = |reg: &Reg| {
                 if let Some(vreg) = reg.as_virtual_reg() {
                     let rc = vreg.get_class();
-                    let spill_slot_size = func.get_spillslot_size(rc, vreg);
+                    let spill_slot_size = func.get_spillslot_size(rc, Some(vreg));
                     let index = vreg.get_index();
                     if index >= array.len() {
                         array.resize(index + 1, None);
@@ -302,9 +302,9 @@ impl Function for IRFunction {
         }
     }
 
-    fn get_spillslot_size(&self, regclass: RegClass, for_vreg: VirtualReg) -> u32 {
-        let entry =
-            self.vreg_spill_slot_sizes[for_vreg.get_index()].expect("missing spillslot info");
+    fn get_spillslot_size(&self, regclass: RegClass, for_vreg: Option<VirtualReg>) -> u32 {
+        let entry = self.vreg_spill_slot_sizes[for_vreg.unwrap().get_index()]
+            .expect("missing spillslot info");
         assert_eq!(entry.1, regclass);
         return entry.0;
     }

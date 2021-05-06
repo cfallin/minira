@@ -288,7 +288,7 @@ pub trait Function {
     /// but we also use them for F32 and F64 values, we may use a different
     /// store-slot size and smaller-operand store/load instructions for an F64
     /// than for a true V128.
-    fn get_spillslot_size(&self, regclass: RegClass, for_vreg: VirtualReg) -> u32;
+    fn get_spillslot_size(&self, regclass: RegClass, for_vreg: Option<VirtualReg>) -> u32;
 
     /// Generate a spill instruction for insertion into the instruction
     /// sequence. The associated virtual register (whose value is being spilled)

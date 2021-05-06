@@ -1,11 +1,11 @@
 //! Compatibility layer that allows us to use regalloc2.
 
+use crate::data_structures::RegVecs;
 use crate::{
     BlockIx, Function, InstIx, RealReg, RealRegUniverse, Reg, RegAllocError, RegAllocResult,
-    RegClass, RegUsageCollector, RegVecs, StackmapRequestInfo, VirtualReg,
+    RegClass, RegUsageCollector, Set, StackmapRequestInfo, TypedIxVec, VirtualReg,
 };
 
-#[derive(Debug)]
 pub struct Shim<'a, F: Function> {
     func: &'a F,
     rru: &'a RealRegUniverse,
@@ -124,6 +124,17 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             shim.succs.push(regalloc2::Block::new(succ.get() as usize));
             edges.push((block.get() as usize, succ.get() as usize));
         }
+        // Remove duplicates.
+        let end = shim.succs.len();
+        shim.succs[start..end].sort_unstable();
+        let mut out = start;
+        for i in start..end {
+            if i == start || shim.succs[i] != shim.succs[i - 1] {
+                shim.succs[out] = shim.succs[i];
+                out += 1;
+            }
+        }
+        shim.succs.truncate(out);
         let end = shim.succs.len();
         shim.succ_ranges.push((start as u32, end as u32));
     }
@@ -140,8 +151,13 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         let edges = &edges[first_edge..i];
 
         let start = shim.preds.len();
+        let mut last = None;
         for &(from, _) in edges {
+            if Some(from) == last {
+                continue;
+            }
             shim.preds.push(regalloc2::Block::new(from));
+            last = Some(from);
         }
         let end = shim.preds.len();
         shim.pred_ranges.push((start as u32, end as u32));
@@ -167,8 +183,8 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             ));
         }
         for &d in &reg_vecs.defs {
-            let vreg = shim.translate_reg_to_vreg(d.to_reg());
-            let policy = shim.translate_reg_to_policy(d.to_reg());
+            let vreg = shim.translate_reg_to_vreg(d);
+            let policy = shim.translate_reg_to_policy(d);
             shim.operands.push(regalloc2::Operand::new(
                 vreg,
                 policy,
@@ -178,8 +194,8 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         }
         for &m in &reg_vecs.mods {
             let idx = shim.operands.len() - start;
-            let vreg = shim.translate_reg_to_vreg(m.to_reg());
-            let use_policy = shim.translate_reg_to_policy(m.to_reg());
+            let vreg = shim.translate_reg_to_vreg(m);
+            let use_policy = shim.translate_reg_to_policy(m);
             let def_policy = regalloc2::OperandPolicy::Reuse(idx);
             shim.operands.push(regalloc2::Operand::new(
                 vreg,
@@ -194,10 +210,19 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
                 regalloc2::OperandPos::After,
             ));
         }
+        let end = shim.operands.len();
+        log::debug!(
+            "operands for inst {}: {:?}",
+            shim.operand_ranges.len(),
+            &shim.operands[start..end]
+        );
+        shim.operand_ranges.push((start as u32, end as u32));
     }
 
     // Compute safepoint map.
     // TODO
+
+    log::debug!("env = {:?}", env);
 
     (shim, env)
 }
@@ -206,7 +231,16 @@ pub(crate) fn update_func<'a, F: Function>(
     shim: Shim<'a, F>,
     out: regalloc2::Output,
 ) -> RegAllocResult<F> {
-    todo!()
+    RegAllocResult {
+        insns: vec![],
+        target_map: TypedIxVec::new(),
+        orig_insn_map: TypedIxVec::new(),
+        clobbered_registers: Set::empty(),
+        num_spill_slots: out.num_spillslots as u32,
+        block_annotations: None,
+        stackmaps: vec![],
+        new_safepoint_insns: vec![],
+    }
 }
 
 fn translate_rc(rc: RegClass) -> regalloc2::RegClass {
@@ -299,8 +333,8 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     }
 
     fn block_preds(&self, block: regalloc2::Block) -> &[regalloc2::Block] {
-        let (start, end) = self.succ_ranges[block.index()];
-        &self.succs[start as usize..end as usize]
+        let (start, end) = self.pred_ranges[block.index()];
+        &self.preds[start as usize..end as usize]
     }
 
     fn block_params(&self, block: regalloc2::Block) -> &[regalloc2::VReg] {
@@ -374,8 +408,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
             regalloc2::RegClass::Int => RegClass::I64,
             regalloc2::RegClass::Float => RegClass::V128,
         };
-        let for_vreg = self.translate_vreg_to_reg(for_vreg).to_virtual_reg();
-        self.func.get_spillslot_size(regclass, for_vreg) as usize
+        self.func.get_spillslot_size(regclass, None) as usize
     }
 
     fn multi_spillslot_named_by_last_slot(&self) -> bool {
