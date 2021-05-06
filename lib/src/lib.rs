@@ -32,6 +32,8 @@ mod snapshot;
 mod sparse_set;
 mod union_find;
 
+mod regalloc2;
+
 use log::{info, log_enabled, Level};
 use std::default;
 use std::{borrow::Cow, fmt};
@@ -411,6 +413,7 @@ pub struct RegAllocResult<F: Function> {
 pub enum AlgorithmWithDefaults {
     Backtracking,
     LinearScan,
+    Regalloc2,
 }
 
 pub use crate::analysis_main::AnalysisError;
@@ -434,11 +437,13 @@ impl fmt::Display for RegAllocError {
 
 pub use crate::bt_main::BacktrackingOptions;
 pub use crate::linear_scan::LinearScanOptions;
+pub use crate::regalloc2::Regalloc2Options;
 
 #[derive(Clone)]
 pub enum Algorithm {
     LinearScan(LinearScanOptions),
     Backtracking(BacktrackingOptions),
+    Regalloc2(Regalloc2Options),
 }
 
 impl fmt::Debug for Algorithm {
@@ -446,6 +451,7 @@ impl fmt::Debug for Algorithm {
         match self {
             Algorithm::LinearScan(opts) => write!(fmt, "{:?}", opts),
             Algorithm::Backtracking(opts) => write!(fmt, "{:?}", opts),
+            Algorithm::Regalloc2(opts) => write!(fmt, "{:?}", opts),
         }
     }
 }
@@ -597,6 +603,9 @@ pub fn allocate_registers_with_opts<F: Function>(
         Algorithm::LinearScan(opts) => {
             linear_scan::run(func, rreg_universe, stackmap_info, run_checker, opts)
         }
+        Algorithm::Regalloc2(opts) => {
+            regalloc2::run(func, rreg_universe, stackmap_info, run_checker, opts)
+        }
     };
 
     info!("================ regalloc.rs: END function ================");
@@ -626,6 +635,7 @@ pub fn allocate_registers<F: Function>(
     let algorithm = match algorithm {
         AlgorithmWithDefaults::Backtracking => Algorithm::Backtracking(Default::default()),
         AlgorithmWithDefaults::LinearScan => Algorithm::LinearScan(Default::default()),
+        AlgorithmWithDefaults::Regalloc2 => Algorithm::Regalloc2(Default::default()),
     };
     let opts = Options {
         algorithm,
