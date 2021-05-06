@@ -30,7 +30,7 @@ pub(crate) enum InstToInsert {
     Move {
         to_reg: Writable<RealReg>,
         from_reg: RealReg,
-        for_vreg: VirtualReg,
+        for_vreg: Option<VirtualReg>,
     },
     /// A spillslot reassignment (to another vreg). In the edited instruction
     /// stream, this is a nop, but this is needed for the checker to properly

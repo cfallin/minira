@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 enum IRInstKind {
     Spill { vreg: Option<VirtualReg> },
     Reload { vreg: Option<VirtualReg> },
-    Move { vreg: VirtualReg },
+    Move { vreg: Option<VirtualReg> },
     ZeroLenNop,
     UserReturn,
     UserMove,
@@ -284,7 +284,7 @@ impl Function for IRFunction {
         &self,
         to_reg: Writable<RealReg>,
         from_reg: RealReg,
-        for_vreg: VirtualReg,
+        for_vreg: Option<VirtualReg>,
     ) -> Self::Inst {
         IRInst {
             reg_uses: vec![from_reg.to_reg()],

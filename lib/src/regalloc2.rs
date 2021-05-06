@@ -3,20 +3,27 @@
 use crate::data_structures::RegVecs;
 use crate::{
     BlockIx, Function, InstIx, RealReg, RealRegUniverse, Reg, RegAllocError, RegAllocResult,
-    RegClass, RegUsageCollector, Set, StackmapRequestInfo, TypedIxVec, VirtualReg,
+    RegClass, RegUsageCollector, Set, SpillSlot, StackmapRequestInfo, TypedIxVec, VirtualReg,
+    Writable,
 };
+use smallvec::{smallvec, SmallVec};
 
 pub struct Shim<'a, F: Function> {
-    func: &'a F,
+    // Register environment state. TODO: factor this out and allow
+    // client to compute the converted env only once.
     rru: &'a RealRegUniverse,
+    rregs_by_preg_index: Vec<RealReg>,
+    extra_scratch_by_class: Vec<regalloc2::PReg>,
+    vreg_offset: usize,
+
+    // Function-specific state.
+    func: &'a mut F,
     succs: Vec<regalloc2::Block>,
     succ_ranges: Vec<(u32, u32)>,
     preds: Vec<regalloc2::Block>,
     pred_ranges: Vec<(u32, u32)>,
     operands: Vec<regalloc2::Operand>,
     operand_ranges: Vec<(u32, u32)>,
-    rregs_by_preg_index: Vec<RealReg>,
-    vreg_offset: usize,
     reftype_vregs: Vec<regalloc2::VReg>,
     safepoints: regalloc2::bitvec::BitVec,
 }
@@ -24,7 +31,7 @@ pub struct Shim<'a, F: Function> {
 fn build_machine_env(
     rru: &RealRegUniverse,
     opts: &Regalloc2Options,
-) -> (regalloc2::MachineEnv, Vec<RealReg>) {
+) -> (regalloc2::MachineEnv, Vec<RealReg>, Vec<regalloc2::PReg>) {
     let mut regs = vec![];
     let mut preferred_regs_by_class = vec![vec![], vec![]];
     let mut non_preferred_regs_by_class = vec![vec![], vec![]];
@@ -84,43 +91,52 @@ fn build_machine_env(
         }
     }
 
+    // Grab an extra scratch reg for each class; we need this in the
+    // (rare but possible) case that we need to do a stack-to-stack
+    // move.
+    let mut extra_scratch_by_class = vec![];
+    extra_scratch_by_class.push(non_preferred_regs_by_class[0].pop().unwrap());
+    extra_scratch_by_class.push(non_preferred_regs_by_class[1].pop().unwrap());
+
     let env = regalloc2::MachineEnv {
         regs,
         preferred_regs_by_class,
         non_preferred_regs_by_class,
         scratch_by_class,
     };
-    (env, rregs_by_preg_idx)
+    (env, rregs_by_preg_idx, extra_scratch_by_class)
 }
 
 pub(crate) fn create_shim_and_env<'a, F: Function>(
-    func: &'a F,
+    func: &'a mut F,
     rru: &'a RealRegUniverse,
     sri: Option<&StackmapRequestInfo>,
     opts: &Regalloc2Options,
 ) -> (Shim<'a, F>, regalloc2::MachineEnv) {
-    let (env, rregs_by_preg_index) = build_machine_env(rru, opts);
+    let (env, rregs_by_preg_index, extra_scratch_by_class) = build_machine_env(rru, opts);
     let vreg_offset = rregs_by_preg_index.len();
     let mut shim = Shim {
-        func,
         rru,
+        rregs_by_preg_index,
+        vreg_offset,
+        extra_scratch_by_class,
+
+        func,
         succs: vec![],
         succ_ranges: vec![],
         preds: vec![],
         pred_ranges: vec![],
         operands: vec![],
         operand_ranges: vec![],
-        rregs_by_preg_index,
-        vreg_offset,
         reftype_vregs: vec![],
         safepoints: regalloc2::bitvec::BitVec::new(),
     };
 
     // Compute preds and succs in a regalloc2-compatible format.
     let mut edges: Vec<(usize, usize)> = vec![];
-    for block in func.blocks() {
+    for block in shim.func.blocks() {
         let start = shim.succs.len();
-        for &succ in func.block_succs(block).iter() {
+        for &succ in shim.func.block_succs(block).iter() {
             shim.succs.push(regalloc2::Block::new(succ.get() as usize));
             edges.push((block.get() as usize, succ.get() as usize));
         }
@@ -140,7 +156,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     }
     edges.sort_unstable_by_key(|(_from, to)| *to);
     let mut i = 0;
-    for block in func.blocks() {
+    for block in shim.func.blocks() {
         while i < edges.len() && edges[i].1 < block.get() as usize {
             i += 1;
         }
@@ -167,7 +183,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     // additional Operands for RealReg vregs based on liveins at
     // entry, and liveouts at return points.)
     let mut reg_vecs = RegVecs::new(false);
-    for insn in func.insns() {
+    for insn in shim.func.insns() {
         reg_vecs.clear();
         let mut coll = RegUsageCollector::new(&mut reg_vecs);
         F::get_regs(insn, &mut coll);
@@ -227,10 +243,78 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     (shim, env)
 }
 
+fn edit_insts<'a, F: Function>(
+    shim: &Shim<'a, F>,
+    from: regalloc2::Allocation,
+    to: regalloc2::Allocation,
+) -> SmallVec<[F::Inst; 2]> {
+    if from.is_reg() && to.is_reg() {
+        let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
+        let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
+        smallvec![shim.func.gen_move(Writable::from_reg(to), from, None)]
+    } else if from.is_reg() && to.is_stack() {
+        let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
+        let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
+        smallvec![shim.func.gen_spill(to, from, None)]
+    } else if from.is_stack() && to.is_reg() {
+        let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
+        let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
+        smallvec![shim.func.gen_reload(Writable::from_reg(to), from, None)]
+    } else {
+        let rc = from.class();
+        let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
+        let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
+        let scratch =
+            shim.rregs_by_preg_index[shim.extra_scratch_by_class[rc as u8 as usize].index()];
+        smallvec![
+            shim.func
+                .gen_reload(Writable::from_reg(scratch), from, None),
+            shim.func.gen_spill(to, scratch, None)
+        ]
+    }
+}
+
 pub(crate) fn update_func<'a, F: Function>(
     shim: Shim<'a, F>,
     out: regalloc2::Output,
 ) -> RegAllocResult<F> {
+    let mut new_insns = vec![];
+    let nop = shim.func.gen_zero_len_nop();
+    let mut edit_idx = 0;
+    for i in 0..shim.func.insns().len() {
+        let insn = std::mem::replace(&mut shim.func.insns_mut()[i], nop.clone());
+
+        let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i));
+        while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
+            assert_eq!(out.edits[edit_idx].0, pos);
+            match &out.edits[edit_idx].1 {
+                &regalloc2::Edit::Move { from, to } => {
+                    for inst in edit_insts(&shim, from, to) {
+                        new_insns.push(inst);
+                    }
+                }
+                _ => {}
+            }
+            edit_idx += 1;
+        }
+
+        new_insns.push(insn);
+
+        let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i));
+        while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
+            assert_eq!(out.edits[edit_idx].0, pos);
+            match &out.edits[edit_idx].1 {
+                &regalloc2::Edit::Move { from, to } => {
+                    for inst in edit_insts(&shim, from, to) {
+                        new_insns.push(inst);
+                    }
+                }
+                _ => {}
+            }
+            edit_idx += 1;
+        }
+    }
+
     RegAllocResult {
         insns: vec![],
         target_map: TypedIxVec::new(),

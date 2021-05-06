@@ -321,7 +321,7 @@ pub trait Function {
         &self,
         to_reg: Writable<RealReg>,
         from_reg: RealReg,
-        for_vreg: VirtualReg,
+        for_vreg: Option<VirtualReg>,
     ) -> Self::Inst;
 
     /// Generate an instruction which is a no-op and has zero length.
