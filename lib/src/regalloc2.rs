@@ -183,11 +183,18 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     // additional Operands for RealReg vregs based on liveins at
     // entry, and liveouts at return points.)
     let mut reg_vecs = RegVecs::new(false);
+    let mut moves = 0;
     for insn in shim.func.insns() {
         reg_vecs.clear();
         let mut coll = RegUsageCollector::new(&mut reg_vecs);
         F::get_regs(insn, &mut coll);
         let start = shim.operands.len();
+        if shim.func.is_move(insn).is_some() {
+            moves += 1;
+            // Moves are handled specially by the regalloc.
+            shim.operand_ranges.push((start as u32, start as u32));
+            continue;
+        }
         for &u in &reg_vecs.uses {
             let vreg = shim.translate_reg_to_vreg(u);
             let policy = shim.translate_reg_to_policy(u);
@@ -235,6 +242,8 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         shim.operand_ranges.push((start as u32, end as u32));
     }
 
+    println!("insns = {} moves = {}", shim.func.insns().len(), moves);
+
     // Compute safepoint map.
     // TODO
 
@@ -278,6 +287,7 @@ pub(crate) fn update_func<'a, F: Function>(
     shim: Shim<'a, F>,
     out: regalloc2::Output,
 ) -> RegAllocResult<F> {
+    println!("stats = {:?}", out.stats);
     let mut new_insns = vec![];
     let nop = shim.func.gen_zero_len_nop();
     let mut edit_idx = 0;
@@ -456,12 +466,15 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
 
     fn is_move(&self, insn: regalloc2::Inst) -> Option<(regalloc2::VReg, regalloc2::VReg)> {
         let inst = &self.func.insns()[insn.index()];
-        self.func.is_move(inst).map(|(dst, src)| {
-            (
-                self.translate_reg_to_vreg(src),
-                self.translate_reg_to_vreg(dst.to_reg()),
-            )
-        })
+        self.func
+            .is_move(inst)
+            .map(|(dst, src)| {
+                (
+                    self.translate_reg_to_vreg(src),
+                    self.translate_reg_to_vreg(dst.to_reg()),
+                )
+            })
+            .filter(|(dst, src)| dst.class() == src.class())
     }
 
     // --------------------------
