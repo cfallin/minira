@@ -3,10 +3,11 @@
 #![allow(dead_code)]
 
 use crate::data_structures::RegVecs;
+use crate::inst_stream::InstToInsert;
 use crate::{
     BlockIx, Function, InstIx, RealReg, RealRegUniverse, Reg, RegAllocError, RegAllocResult,
-    RegClass, RegUsageCollector, Set, SpillSlot, StackmapRequestInfo, TypedIxVec, VirtualReg,
-    Writable,
+    RegClass, RegUsageCollector, RegUsageMapper, Set, SpillSlot, StackmapRequestInfo, TypedIxVec,
+    VirtualReg, Writable,
 };
 use smallvec::{smallvec, SmallVec};
 
@@ -15,6 +16,7 @@ pub struct Shim<'a, F: Function> {
     // client to compute the converted env only once.
     rru: &'a RealRegUniverse,
     rregs_by_preg_index: Vec<RealReg>,
+    pregs_by_rreg_index: Vec<regalloc2::PReg>,
     extra_scratch_by_class: Vec<regalloc2::PReg>,
     vreg_offset: usize,
 
@@ -33,7 +35,12 @@ pub struct Shim<'a, F: Function> {
 fn build_machine_env(
     rru: &RealRegUniverse,
     opts: &Regalloc2Options,
-) -> (regalloc2::MachineEnv, Vec<RealReg>, Vec<regalloc2::PReg>) {
+) -> (
+    regalloc2::MachineEnv,
+    Vec<RealReg>,
+    Vec<regalloc2::PReg>,
+    Vec<regalloc2::PReg>,
+) {
     let mut regs = vec![];
     let mut preferred_regs_by_class = vec![vec![], vec![]];
     let mut non_preferred_regs_by_class = vec![vec![], vec![]];
@@ -49,49 +56,69 @@ fn build_machine_env(
     assert!(rru.allocable_by_class[RegClass::rc_to_usize(RegClass::F32)].is_none());
     assert!(rru.allocable_by_class[RegClass::rc_to_usize(RegClass::F64)].is_none());
 
+    // PReg is limited to 64 (32 int, 32 float) regs due to
+    // bitpacking, so just build full lookup tables in both
+    // directions.
     let mut rregs_by_preg_idx = vec![RealReg::invalid(); 64];
+    let mut pregs_by_rreg_idx = vec![regalloc2::PReg::invalid(); 64];
 
     let int_info = rru.allocable_by_class[RegClass::rc_to_usize(RegClass::I64)]
         .as_ref()
         .unwrap();
     assert!(int_info.suggested_scratch.is_some());
-    for i in int_info.first..int_info.last {
-        let idx = i - int_info.first;
-        let rreg = rru.regs[i].0;
-        let preg = regalloc2::PReg::new(idx, regalloc2::RegClass::Int);
-        rregs_by_preg_idx[preg.index()] = rreg;
-        regs.push(preg);
-        if i == int_info.suggested_scratch.unwrap() {
-            scratch_by_class[0] = preg;
-        } else if i < rru.allocable {
-            if idx < opts.num_int_preferred {
-                preferred_regs_by_class[0].push(preg);
-            } else {
-                non_preferred_regs_by_class[0].push(preg);
-            }
-        }
-    }
-
     let float_info = rru.allocable_by_class[RegClass::rc_to_usize(RegClass::V128)]
         .as_ref()
         .unwrap();
     assert!(float_info.suggested_scratch.is_some());
-    for i in float_info.first..float_info.last {
-        let idx = i - float_info.first;
-        let rreg = rru.regs[i].0;
-        let preg = regalloc2::PReg::new(idx, regalloc2::RegClass::Float);
-        rregs_by_preg_idx[preg.index()] = rreg;
+
+    let mut int_idx = 0;
+    let mut float_idx = 0;
+    for (rreg, _) in &rru.regs {
+        let preg = match rreg.get_class() {
+            RegClass::I64 => {
+                let i = int_idx;
+                int_idx += 1;
+                regalloc2::PReg::new(i, regalloc2::RegClass::Int)
+            }
+            RegClass::V128 => {
+                let i = float_idx;
+                float_idx += 1;
+                regalloc2::PReg::new(i, regalloc2::RegClass::Float)
+            }
+            _ => unreachable!(),
+        };
+
+        // We'll sort these by index below.
         regs.push(preg);
-        if i == float_info.suggested_scratch.unwrap() {
+
+        rregs_by_preg_idx[preg.index()] = *rreg;
+        pregs_by_rreg_idx[rreg.get_index()] = preg;
+
+        if rreg.get_index() == int_info.suggested_scratch.unwrap() {
+            scratch_by_class[0] = preg;
+        } else if rreg.get_index() == float_info.suggested_scratch.unwrap() {
             scratch_by_class[1] = preg;
-        } else if i < rru.allocable {
-            if idx < opts.num_float_preferred {
-                preferred_regs_by_class[1].push(preg);
-            } else {
-                non_preferred_regs_by_class[1].push(preg);
+        } else if rreg.get_index() < rru.allocable {
+            match preg.class() {
+                regalloc2::RegClass::Int => {
+                    if int_idx <= opts.num_int_preferred {
+                        preferred_regs_by_class[0].push(preg);
+                    } else {
+                        non_preferred_regs_by_class[0].push(preg);
+                    }
+                }
+                regalloc2::RegClass::Float => {
+                    if float_idx <= opts.num_float_preferred {
+                        preferred_regs_by_class[1].push(preg);
+                    } else {
+                        non_preferred_regs_by_class[1].push(preg);
+                    }
+                }
             }
         }
     }
+
+    regs.sort_by_key(|preg| preg.index());
 
     // Grab an extra scratch reg for each class; we need this in the
     // (rare but possible) case that we need to do a stack-to-stack
@@ -106,7 +133,12 @@ fn build_machine_env(
         non_preferred_regs_by_class,
         scratch_by_class,
     };
-    (env, rregs_by_preg_idx, extra_scratch_by_class)
+    (
+        env,
+        rregs_by_preg_idx,
+        pregs_by_rreg_idx,
+        extra_scratch_by_class,
+    )
 }
 
 pub(crate) fn create_shim_and_env<'a, F: Function>(
@@ -115,11 +147,13 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     _sri: Option<&StackmapRequestInfo>,
     opts: &Regalloc2Options,
 ) -> (Shim<'a, F>, regalloc2::MachineEnv) {
-    let (env, rregs_by_preg_index, extra_scratch_by_class) = build_machine_env(rru, opts);
+    let (env, rregs_by_preg_index, pregs_by_rreg_index, extra_scratch_by_class) =
+        build_machine_env(rru, opts);
     let vreg_offset = rregs_by_preg_index.len();
     let mut shim = Shim {
         rru,
         rregs_by_preg_index,
+        pregs_by_rreg_index,
         vreg_offset,
         extra_scratch_by_class,
 
@@ -203,14 +237,6 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             shim.operand_ranges.push((start as u32, start as u32));
             continue;
         }
-        // If this is a return, use all liveouts.
-        if shim.func.is_ret(InstIx::new(i as u32)) {
-            for &liveout in shim.func.func_liveouts().iter() {
-                shim.operands.push(regalloc2::Operand::reg_use(
-                    shim.translate_realreg_to_vreg(liveout),
-                ));
-            }
-        }
         for &u in &reg_vecs.uses {
             let vreg = shim.translate_reg_to_vreg(u);
             let policy = shim.translate_reg_to_policy(u);
@@ -241,6 +267,14 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
                 regalloc2::OperandPos::Before,
             ));
         }
+        // If this is a return, use all liveouts.
+        if shim.func.is_ret(InstIx::new(i as u32)) {
+            for &liveout in shim.func.func_liveouts().iter() {
+                shim.operands.push(regalloc2::Operand::reg_use(
+                    shim.translate_realreg_to_vreg(liveout),
+                ));
+            }
+        }
         let end = shim.operands.len();
         log::debug!(
             "operands for inst {}: {:?}",
@@ -264,19 +298,31 @@ fn edit_insts<'a, F: Function>(
     shim: &Shim<'a, F>,
     from: regalloc2::Allocation,
     to: regalloc2::Allocation,
-) -> SmallVec<[F::Inst; 2]> {
+) -> SmallVec<[InstToInsert; 2]> {
     if from.is_reg() && to.is_reg() {
         let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
-        smallvec![shim.func.gen_move(Writable::from_reg(to), from, None)]
+        smallvec![InstToInsert::Move {
+            to_reg: Writable::from_reg(to),
+            from_reg: from,
+            for_vreg: None
+        }]
     } else if from.is_reg() && to.is_stack() {
         let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
         let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
-        smallvec![shim.func.gen_spill(to, from, None)]
+        smallvec![InstToInsert::Spill {
+            to_slot: to,
+            from_reg: from,
+            for_vreg: None
+        }]
     } else if from.is_stack() && to.is_reg() {
         let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
-        smallvec![shim.func.gen_reload(Writable::from_reg(to), from, None)]
+        smallvec![InstToInsert::Reload {
+            to_reg: Writable::from_reg(to),
+            from_slot: from,
+            for_vreg: None
+        }]
     } else {
         let rc = from.class();
         let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
@@ -284,14 +330,93 @@ fn edit_insts<'a, F: Function>(
         let scratch =
             shim.rregs_by_preg_index[shim.extra_scratch_by_class[rc as u8 as usize].index()];
         smallvec![
-            shim.func
-                .gen_reload(Writable::from_reg(scratch), from, None),
-            shim.func.gen_spill(to, scratch, None)
+            InstToInsert::Reload {
+                to_reg: Writable::from_reg(scratch),
+                from_slot: from,
+                for_vreg: None
+            },
+            InstToInsert::Spill {
+                to_slot: to,
+                from_reg: scratch,
+                for_vreg: None,
+            },
         ]
     }
 }
 
-pub(crate) fn update_func<'a, F: Function>(
+struct Mapper<'a, 'b, F: Function> {
+    shim: &'b Shim<'a, F>,
+    operands: &'b [regalloc2::Operand],
+    allocs: &'b [regalloc2::Allocation],
+}
+
+impl<'a, 'b, F: Function> std::fmt::Debug for Mapper<'a, 'b, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "mapper({:?}, {:?})", self.operands, self.allocs)
+    }
+}
+
+impl<'a, 'b, F: Function> Mapper<'a, 'b, F> {
+    fn get_vreg_at_point(&self, vreg: VirtualReg, pos: regalloc2::OperandPos) -> Option<RealReg> {
+        let vreg = self.shim.translate_virtualreg_to_vreg(vreg);
+        for (i, op) in self.operands.iter().enumerate() {
+            if op.vreg() == vreg && op.pos() == pos {
+                if self.allocs[i].is_reg() {
+                    return Some(
+                        self.shim.rregs_by_preg_index[self.allocs[i].as_reg().unwrap().index()],
+                    );
+                } else {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+}
+
+impl<'a, 'b, F: Function> RegUsageMapper for Mapper<'a, 'b, F> {
+    fn get_use(&self, vreg: VirtualReg) -> Option<RealReg> {
+        self.get_vreg_at_point(vreg, regalloc2::OperandPos::Before)
+    }
+
+    fn get_def(&self, vreg: VirtualReg) -> Option<RealReg> {
+        self.get_vreg_at_point(vreg, regalloc2::OperandPos::After)
+    }
+
+    fn get_mod(&self, vreg: VirtualReg) -> Option<RealReg> {
+        self.get_vreg_at_point(vreg, regalloc2::OperandPos::Before)
+    }
+}
+
+fn edit_insn_registers<'a, F: Function>(
+    iix: InstIx,
+    insn: &mut F::Inst,
+    shim: &Shim<'a, F>,
+    out: &regalloc2::Output,
+    clobbers: &mut Set<RealReg>,
+) {
+    let (op_start, op_end) = shim.operand_ranges[(iix.get() + 1) as usize];
+    let operands = &shim.operands[op_start as usize..op_end as usize];
+    let allocs = &out.allocs[op_start as usize..op_end as usize];
+    let mapper = Mapper {
+        shim,
+        operands,
+        allocs,
+    };
+    F::map_regs(insn, &mapper);
+
+    if shim.func.is_included_in_clobbers(insn) {
+        for (op, alloc) in operands.iter().zip(allocs.iter()) {
+            if op.kind() != regalloc2::OperandKind::Use && alloc.is_reg() {
+                let rreg = shim.rregs_by_preg_index[alloc.as_reg().unwrap().index()];
+                assert!(rreg.is_valid());
+                clobbers.insert(rreg);
+            }
+        }
+    }
+}
+
+pub(crate) fn finalize<'a, F: Function>(
     shim: Shim<'a, F>,
     out: regalloc2::Output,
 ) -> RegAllocResult<F> {
@@ -299,46 +424,62 @@ pub(crate) fn update_func<'a, F: Function>(
     let mut new_insns = vec![];
     let nop = shim.func.gen_zero_len_nop();
     let mut edit_idx = 0;
-    for i in 0..shim.func.insns().len() {
-        let insn = std::mem::replace(&mut shim.func.insns_mut()[i], nop.clone());
+    let mut target_map: TypedIxVec<BlockIx, InstIx> = TypedIxVec::new();
+    let mut orig_insn_map: TypedIxVec<InstIx, InstIx> = TypedIxVec::new();
+    let mut clobbers = Set::empty();
+    for block in shim.func.blocks() {
+        target_map.push(InstIx::new(new_insns.len() as u32));
+        for iix in shim.func.block_insns(block) {
+            let i = iix.get() as usize;
+            let mut insn = std::mem::replace(&mut shim.func.insns_mut()[i], nop.clone());
 
-        // i + 1 because of entry inst.
-        let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i + 1));
-        while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
-            assert_eq!(out.edits[edit_idx].0, pos);
-            match &out.edits[edit_idx].1 {
-                &regalloc2::Edit::Move { from, to } => {
-                    for inst in edit_insts(&shim, from, to) {
-                        new_insns.push(inst);
+            // i + 1 because of entry inst.
+            let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i + 1));
+            while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
+                assert_eq!(out.edits[edit_idx].0, pos);
+                match &out.edits[edit_idx].1 {
+                    &regalloc2::Edit::Move { from, to } => {
+                        for inst in edit_insts(&shim, from, to) {
+                            new_insns.push(inst.construct(shim.func).unwrap());
+                            orig_insn_map.push(InstIx::invalid_value());
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+                edit_idx += 1;
             }
-            edit_idx += 1;
-        }
 
-        new_insns.push(insn);
+            // regalloc2 handles moves on its own -- we do not need to
+            // edit them here (and in fact it will fail, as there will
+            // be no corresponding operands).
+            if shim.func.is_move(&insn).is_none() {
+                edit_insn_registers(iix, &mut insn, &shim, &out, &mut clobbers);
+                orig_insn_map.push(iix);
+                new_insns.push(insn);
+            }
 
-        let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i + 1));
-        while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
-            assert_eq!(out.edits[edit_idx].0, pos);
-            match &out.edits[edit_idx].1 {
-                &regalloc2::Edit::Move { from, to } => {
-                    for inst in edit_insts(&shim, from, to) {
-                        new_insns.push(inst);
+            let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i + 1));
+            while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
+                assert_eq!(out.edits[edit_idx].0, pos);
+                match &out.edits[edit_idx].1 {
+                    &regalloc2::Edit::Move { from, to } => {
+                        for inst in edit_insts(&shim, from, to) {
+                            new_insns.push(inst.construct(shim.func).unwrap());
+                            orig_insn_map.push(InstIx::invalid_value());
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+                edit_idx += 1;
             }
-            edit_idx += 1;
         }
     }
 
     RegAllocResult {
-        insns: vec![],
-        target_map: TypedIxVec::new(),
-        orig_insn_map: TypedIxVec::new(),
-        clobbered_registers: Set::empty(),
+        insns: new_insns,
+        target_map,
+        orig_insn_map,
+        clobbered_registers: clobbers,
         num_spill_slots: out.num_spillslots as u32,
         block_annotations: None,
         stackmaps: vec![],
@@ -363,11 +504,7 @@ fn translate_to_rc(rc: regalloc2::RegClass) -> RegClass {
 
 impl<'a, F: Function> Shim<'a, F> {
     fn translate_realreg_to_preg(&self, reg: RealReg) -> regalloc2::PReg {
-        let rc = reg.get_class();
-        let trc = translate_rc(rc);
-        let info = &self.rru.allocable_by_class[rc as usize].as_ref().unwrap();
-        let idx = reg.get_index() - info.first;
-        regalloc2::PReg::new(idx, trc)
+        self.pregs_by_rreg_index[reg.get_index()]
     }
 
     fn translate_realreg_to_vreg(&self, reg: RealReg) -> regalloc2::VReg {
@@ -568,5 +705,5 @@ pub(crate) fn run<F: Function>(
     let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts);
     let result = regalloc2::run(&ra2_func, &env)
         .map_err(|err| RegAllocError::Other(format!("{:?}", err)))?;
-    Ok(update_func(ra2_func, result))
+    Ok(finalize(ra2_func, result))
 }
