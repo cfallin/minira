@@ -284,7 +284,11 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         shim.operand_ranges.push((start as u32, end as u32));
     }
 
-    println!("insns = {} moves = {}", shim.func.insns().len(), moves);
+    log::info!(
+        "regalloc2-to-regalloc shim: insns = {} moves = {}",
+        shim.func.insns().len(),
+        moves
+    );
 
     // Compute safepoint map.
     // TODO
@@ -300,8 +304,10 @@ fn edit_insts<'a, F: Function>(
     to: regalloc2::Allocation,
 ) -> SmallVec<[InstToInsert; 2]> {
     if from.is_reg() && to.is_reg() {
+        assert_eq!(to.as_reg().unwrap().class(), from.as_reg().unwrap().class());
         let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
+        assert_eq!(to.get_class(), from.get_class());
         smallvec![InstToInsert::Move {
             to_reg: Writable::from_reg(to),
             from_reg: from,
@@ -420,7 +426,6 @@ pub(crate) fn finalize<'a, F: Function>(
     shim: Shim<'a, F>,
     out: regalloc2::Output,
 ) -> RegAllocResult<F> {
-    println!("stats = {:?}", out.stats);
     let mut new_insns = vec![];
     let nop = shim.func.gen_zero_len_nop();
     let mut edit_idx = 0;
