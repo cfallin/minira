@@ -232,21 +232,13 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             ));
         }
         for &m in &reg_vecs.mods {
-            let idx = shim.operands.len() - start;
             let vreg = shim.translate_reg_to_vreg(m);
-            let use_policy = shim.translate_reg_to_policy(m);
-            let def_policy = regalloc2::OperandPolicy::Reuse(idx);
+            let policy = shim.translate_reg_to_policy(m);
             shim.operands.push(regalloc2::Operand::new(
                 vreg,
-                use_policy,
-                regalloc2::OperandKind::Use,
+                policy,
+                regalloc2::OperandKind::Mod,
                 regalloc2::OperandPos::Before,
-            ));
-            shim.operands.push(regalloc2::Operand::new(
-                vreg,
-                def_policy,
-                regalloc2::OperandKind::Def,
-                regalloc2::OperandPos::After,
             ));
         }
         let end = shim.operands.len();
