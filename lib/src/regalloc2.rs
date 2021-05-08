@@ -1,5 +1,7 @@
 //! Compatibility layer that allows us to use regalloc2.
 
+#![allow(dead_code)]
+
 use crate::data_structures::RegVecs;
 use crate::{
     BlockIx, Function, InstIx, RealReg, RealRegUniverse, Reg, RegAllocError, RegAllocResult,
@@ -110,7 +112,7 @@ fn build_machine_env(
 pub(crate) fn create_shim_and_env<'a, F: Function>(
     func: &'a mut F,
     rru: &'a RealRegUniverse,
-    sri: Option<&StackmapRequestInfo>,
+    _sri: Option<&StackmapRequestInfo>,
     opts: &Regalloc2Options,
 ) -> (Shim<'a, F>, regalloc2::MachineEnv) {
     let (env, rregs_by_preg_index, extra_scratch_by_class) = build_machine_env(rru, opts);
@@ -179,12 +181,18 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         shim.pred_ranges.push((start as u32, end as u32));
     }
 
-    // Create Operands for each reg use/def/mod in the function.  (Add
-    // additional Operands for RealReg vregs based on liveins at
-    // entry, and liveouts at return points.)
+    // Create a virtual entry instruction with livein defs.
+    for &livein in shim.func.func_liveins().iter() {
+        shim.operands.push(regalloc2::Operand::reg_def(
+            shim.translate_realreg_to_vreg(livein),
+        ));
+    }
+    shim.operand_ranges.push((0, shim.operands.len() as u32));
+
+    // Create Operands for each reg use/def/mod in the function.
     let mut reg_vecs = RegVecs::new(false);
     let mut moves = 0;
-    for insn in shim.func.insns() {
+    for (i, insn) in shim.func.insns().iter().enumerate() {
         reg_vecs.clear();
         let mut coll = RegUsageCollector::new(&mut reg_vecs);
         F::get_regs(insn, &mut coll);
@@ -194,6 +202,14 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             // Moves are handled specially by the regalloc.
             shim.operand_ranges.push((start as u32, start as u32));
             continue;
+        }
+        // If this is a return, use all liveouts.
+        if shim.func.is_ret(InstIx::new(i as u32)) {
+            for &liveout in shim.func.func_liveouts().iter() {
+                shim.operands.push(regalloc2::Operand::reg_use(
+                    shim.translate_realreg_to_vreg(liveout),
+                ));
+            }
         }
         for &u in &reg_vecs.uses {
             let vreg = shim.translate_reg_to_vreg(u);
@@ -294,7 +310,8 @@ pub(crate) fn update_func<'a, F: Function>(
     for i in 0..shim.func.insns().len() {
         let insn = std::mem::replace(&mut shim.func.insns_mut()[i], nop.clone());
 
-        let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i));
+        // i + 1 because of entry inst.
+        let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i + 1));
         while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
             assert_eq!(out.edits[edit_idx].0, pos);
             match &out.edits[edit_idx].1 {
@@ -310,7 +327,7 @@ pub(crate) fn update_func<'a, F: Function>(
 
         new_insns.push(insn);
 
-        let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i));
+        let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i + 1));
         while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
             assert_eq!(out.edits[edit_idx].0, pos);
             match &out.edits[edit_idx].1 {
@@ -373,8 +390,6 @@ impl<'a, F: Function> Shim<'a, F> {
     }
 
     fn translate_reg_to_vreg(&self, reg: Reg) -> regalloc2::VReg {
-        let rc = reg.get_class();
-        let trc = translate_rc(rc);
         if reg.is_real() {
             self.translate_realreg_to_vreg(reg.to_real_reg())
         } else {
@@ -392,18 +407,17 @@ impl<'a, F: Function> Shim<'a, F> {
         }
     }
 
-    fn translate_reg_to_policy(&self, reg: Reg) -> regalloc2::OperandPolicy {
-        if reg.is_real() {
-            regalloc2::OperandPolicy::FixedReg(self.translate_realreg_to_preg(reg.to_real_reg()))
-        } else {
-            regalloc2::OperandPolicy::Reg
-        }
+    fn translate_reg_to_policy(&self, _reg: Reg) -> regalloc2::OperandPolicy {
+        // We use the pinned-register mechanism to pin RealReg vregs,
+        // so we don't need a fixed-reg policy here.
+        regalloc2::OperandPolicy::Reg
     }
 }
 
 impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     fn insts(&self) -> usize {
-        self.func.insns().len()
+        // Add 1 for the virtual entry instruction.
+        self.func.insns().len() + 1
     }
 
     fn blocks(&self) -> usize {
@@ -411,13 +425,21 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     }
 
     fn entry_block(&self) -> regalloc2::Block {
-        regalloc2::Block::new(self.func.entry_block().get() as usize)
+        // Only 0 is supported, to keep the virtual entry instruction
+        // handling simple.
+        assert_eq!(self.func.entry_block().get(), 0);
+        regalloc2::Block::new(0)
     }
 
     fn block_insns(&self, block: regalloc2::Block) -> regalloc2::InstRange {
         let range = self.func.block_insns(BlockIx::new(block.index() as u32));
-        let start = regalloc2::Inst::new(range.first().get() as usize);
-        let end = regalloc2::Inst::new(range.first().get() as usize + range.len());
+        let mut start = regalloc2::Inst::new(range.first().get() as usize);
+        let mut end = regalloc2::Inst::new(range.first().get() as usize + range.len());
+        // Virtual entry instruction offsets by 1.
+        if block.index() > 0 {
+            start = start.next();
+        }
+        end = end.next();
         regalloc2::InstRange::forward(start, end)
     }
 
@@ -431,30 +453,34 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
         &self.preds[start as usize..end as usize]
     }
 
-    fn block_params(&self, block: regalloc2::Block) -> &[regalloc2::VReg] {
+    fn block_params(&self, _block: regalloc2::Block) -> &[regalloc2::VReg] {
         // We don't use blockparams.
         &[]
     }
 
-    fn is_call(&self, insn: regalloc2::Inst) -> bool {
+    fn is_call(&self, _insn: regalloc2::Inst) -> bool {
         // We don't have this info in regalloc1 interface, but it is
         // just for heuristics, not strictly needed.
         false
     }
 
     fn is_ret(&self, insn: regalloc2::Inst) -> bool {
-        self.func.is_ret(InstIx::new(insn.index() as u32))
+        if insn.index() == 0 {
+            false
+        } else {
+            self.func.is_ret(InstIx::new((insn.index() as u32) - 1))
+        }
     }
 
-    fn is_branch(&self, insn: regalloc2::Inst) -> bool {
+    fn is_branch(&self, _insn: regalloc2::Inst) -> bool {
         // Only needed if we use blockparams.
         false
     }
 
     fn branch_blockparam_arg_offset(
         &self,
-        block: regalloc2::Block,
-        insn: regalloc2::Inst,
+        _block: regalloc2::Block,
+        _insn: regalloc2::Inst,
     ) -> usize {
         // We don't use blockparams.
         0
@@ -465,7 +491,11 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     }
 
     fn is_move(&self, insn: regalloc2::Inst) -> Option<(regalloc2::VReg, regalloc2::VReg)> {
-        let inst = &self.func.insns()[insn.index()];
+        if insn.index() == 0 {
+            return None;
+        }
+        let insn = insn.index() - 1;
+        let inst = &self.func.insns()[insn];
         self.func
             .is_move(inst)
             .map(|(dst, src)| {
@@ -486,7 +516,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
         &self.operands[start as usize..end as usize]
     }
 
-    fn inst_clobbers(&self, insn: regalloc2::Inst) -> &[regalloc2::PReg] {
+    fn inst_clobbers(&self, _insn: regalloc2::Inst) -> &[regalloc2::PReg] {
         // We don't use clobbers; we translate the regalloc1 func's
         // never-used defs.
         &[]
@@ -500,7 +530,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
         &self.reftype_vregs[..]
     }
 
-    fn spillslot_size(&self, regclass: regalloc2::RegClass, for_vreg: regalloc2::VReg) -> usize {
+    fn spillslot_size(&self, regclass: regalloc2::RegClass, _for_vreg: regalloc2::VReg) -> usize {
         let regclass = match regclass {
             regalloc2::RegClass::Int => RegClass::I64,
             regalloc2::RegClass::Float => RegClass::V128,
@@ -510,6 +540,14 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
 
     fn multi_spillslot_named_by_last_slot(&self) -> bool {
         false
+    }
+
+    fn is_pinned_vreg(&self, vreg: regalloc2::VReg) -> Option<regalloc2::PReg> {
+        if vreg.vreg() < self.vreg_offset {
+            Some(regalloc2::PReg::from_index(vreg.vreg()))
+        } else {
+            None
+        }
     }
 }
 
@@ -532,7 +570,7 @@ pub(crate) fn run<F: Function>(
     func: &mut F,
     rreg_universe: &RealRegUniverse,
     stackmap_info: Option<&StackmapRequestInfo>,
-    run_checker: bool,
+    _run_checker: bool,
     opts: &Regalloc2Options,
 ) -> Result<RegAllocResult<F>, RegAllocError> {
     let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts);
