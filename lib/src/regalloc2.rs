@@ -2,8 +2,9 @@
 
 #![allow(dead_code)]
 
+use crate::checker::{CheckerContext, CheckerErrors};
 use crate::data_structures::RegVecs;
-use crate::inst_stream::InstToInsert;
+use crate::inst_stream::{ExtPoint, InstExtPoint, InstToInsert, InstToInsertAndExtPoint};
 use crate::{
     BlockIx, Function, InstIx, RealReg, RealRegUniverse, Reg, RegAllocError, RegAllocResult,
     RegClass, RegUsageCollector, RegUsageMapper, Set, SpillSlot, StackmapRequestInfo, TypedIxVec,
@@ -395,12 +396,14 @@ impl<'a, 'b, F: Function> RegUsageMapper for Mapper<'a, 'b, F> {
 }
 
 fn edit_insn_registers<'a, F: Function>(
+    bix: BlockIx,
     iix: InstIx,
     insn: &mut F::Inst,
     shim: &Shim<'a, F>,
     out: &regalloc2::Output,
     clobbers: &mut Set<RealReg>,
-) {
+    checker: &mut Option<CheckerContext>,
+) -> Result<(), CheckerErrors> {
     let (op_start, op_end) = shim.operand_ranges[(iix.get() + 1) as usize];
     let operands = &shim.operands[op_start as usize..op_end as usize];
     let allocs = &out.allocs[op_start as usize..op_end as usize];
@@ -411,6 +414,10 @@ fn edit_insn_registers<'a, F: Function>(
     };
     F::map_regs(insn, &mapper);
 
+    if let Some(checker) = checker.as_mut() {
+        checker.handle_insn(shim.rru, shim.func, bix, iix, &mapper)?;
+    }
+
     if shim.func.is_included_in_clobbers(insn) {
         for (op, alloc) in operands.iter().zip(allocs.iter()) {
             if op.kind() != regalloc2::OperandKind::Use && alloc.is_reg() {
@@ -420,12 +427,55 @@ fn edit_insn_registers<'a, F: Function>(
             }
         }
     }
+
+    Ok(())
+}
+
+fn compute_insts_to_add<'a, F: Function>(
+    shim: &Shim<'a, F>,
+    out: &regalloc2::Output,
+) -> Vec<InstToInsertAndExtPoint> {
+    let mut ret = vec![];
+    for (pos, edit) in &out.edits {
+        let pos = if pos.inst().index() == 0 {
+            InstExtPoint::new(InstIx::new(0), ExtPoint::Reload)
+        } else {
+            InstExtPoint::new(
+                InstIx::new((pos.inst().index() - 1) as u32),
+                match pos.pos() {
+                    regalloc2::InstPosition::Before => ExtPoint::Reload,
+                    regalloc2::InstPosition::After => ExtPoint::Spill,
+                },
+            )
+        };
+        match edit {
+            &regalloc2::Edit::Move { from, to } => {
+                for edit in edit_insts(shim, from, to) {
+                    ret.push(InstToInsertAndExtPoint::new(edit, pos.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    ret
 }
 
 pub(crate) fn finalize<'a, F: Function>(
     shim: Shim<'a, F>,
     out: regalloc2::Output,
-) -> RegAllocResult<F> {
+    run_checker: bool,
+) -> Result<RegAllocResult<F>, RegAllocError> {
+    let mut checker = if run_checker {
+        Some(CheckerContext::new(
+            shim.func,
+            shim.rru,
+            &compute_insts_to_add(&shim, &out),
+            /* TODO stackmap_info */ None,
+        ))
+    } else {
+        None
+    };
+
     let mut new_insns = vec![];
     let nop = shim.func.gen_zero_len_nop();
     let mut edit_idx = 0;
@@ -458,7 +508,16 @@ pub(crate) fn finalize<'a, F: Function>(
             // edit them here (and in fact it will fail, as there will
             // be no corresponding operands).
             if shim.func.is_move(&insn).is_none() {
-                edit_insn_registers(iix, &mut insn, &shim, &out, &mut clobbers);
+                edit_insn_registers(
+                    block,
+                    iix,
+                    &mut insn,
+                    &shim,
+                    &out,
+                    &mut clobbers,
+                    &mut checker,
+                )
+                .map_err(|err| RegAllocError::RegChecker(err))?;
                 orig_insn_map.push(iix);
                 new_insns.push(insn);
             }
@@ -480,7 +539,13 @@ pub(crate) fn finalize<'a, F: Function>(
         }
     }
 
-    RegAllocResult {
+    if let Some(checker) = checker.take() {
+        checker
+            .run()
+            .map_err(|err| RegAllocError::RegChecker(err))?;
+    }
+
+    Ok(RegAllocResult {
         insns: new_insns,
         target_map,
         orig_insn_map,
@@ -489,7 +554,7 @@ pub(crate) fn finalize<'a, F: Function>(
         block_annotations: None,
         stackmaps: vec![],
         new_safepoint_insns: vec![],
-    }
+    })
 }
 
 fn translate_rc(rc: RegClass) -> regalloc2::RegClass {
@@ -704,11 +769,11 @@ pub(crate) fn run<F: Function>(
     func: &mut F,
     rreg_universe: &RealRegUniverse,
     stackmap_info: Option<&StackmapRequestInfo>,
-    _run_checker: bool,
+    run_checker: bool,
     opts: &Regalloc2Options,
 ) -> Result<RegAllocResult<F>, RegAllocError> {
     let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts);
     let result = regalloc2::run(&ra2_func, &env)
         .map_err(|err| RegAllocError::Other(format!("{:?}", err)))?;
-    Ok(finalize(ra2_func, result))
+    finalize(ra2_func, result, run_checker)
 }

@@ -26,6 +26,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "regalloc2"
+path = "fuzz_targets/regalloc2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "lsra"
 path = "fuzz_targets/lsra.rs"
 test = false

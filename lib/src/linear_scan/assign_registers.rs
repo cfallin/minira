@@ -24,6 +24,11 @@ macro_rules! lsra_assert {
         #[cfg(debug_assertions)]
         debug_assert!($arg, $text);
     };
+
+    ($arg:expr, $text:expr, $data:expr) => {
+        #[cfg(debug_assertions)]
+        debug_assert!($arg, $text, $data);
+    };
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -333,7 +338,8 @@ impl<T> std::ops::Index<RealReg> for RegisterMapping<T> {
         );
         lsra_assert!(
             Some(rreg) != self.scratch,
-            format!("trying to const-use the scratch of {:?}", rreg.get_class())
+            "trying to const-use the scratch of {:?}",
+            rreg.get_class()
         );
         &self.regs[rreg.get_index() - self.offset].1
     }
@@ -347,7 +353,8 @@ impl<T> std::ops::IndexMut<RealReg> for RegisterMapping<T> {
         );
         lsra_assert!(
             Some(rreg) != self.scratch,
-            format!("trying to mut-use the scratch of {:?}", rreg.get_class())
+            "trying to mut-use the scratch of {:?}",
+            rreg.get_class()
         );
         &mut self.regs[rreg.get_index() - self.offset].1
     }

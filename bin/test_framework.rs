@@ -2330,7 +2330,7 @@ impl regalloc::Function for Func {
     /// 64-bit machine, spill slots may nominally be 64-bit words, but a 128-bit
     /// vector value will require two slots.  The regalloc will always align on
     /// this size.
-    fn get_spillslot_size(&self, _regclass: RegClass, _for_vreg: VirtualReg) -> u32 {
+    fn get_spillslot_size(&self, _regclass: RegClass, _for_vreg: Option<VirtualReg>) -> u32 {
         // For our simple test ISA, every value occupies one spill slot.
         1
     }
@@ -2369,7 +2369,7 @@ impl regalloc::Function for Func {
         &self,
         to_reg: Writable<RealReg>,
         from_reg: RealReg,
-        _for_vreg: VirtualReg,
+        _for_vreg: Option<VirtualReg>,
     ) -> Self::Inst {
         match to_reg.to_reg().get_class() {
             RegClass::I32 => Inst::Copy {
