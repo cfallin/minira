@@ -166,9 +166,9 @@ impl AM {
     fn type_checks(&self, cx: &mut ValidatorContext) -> bool {
         use RegClass::*;
         match self {
-            AM::RI { base, .. } => cx.check_reg_rc(base, RegRef::Use, I32),
+            AM::RI { base, .. } => cx.check_reg_rc(base, RegRef::Use, I64),
             AM::RR { base, offset } => {
-                cx.check_reg_rc(base, RegRef::Use, I32) && cx.check_reg_rc(offset, RegRef::Use, I32)
+                cx.check_reg_rc(base, RegRef::Use, I64) && cx.check_reg_rc(offset, RegRef::Use, I64)
             }
         }
     }
@@ -1096,28 +1096,28 @@ impl Inst {
         // Always check uses before defs.
         match self {
             Inst::NopZ {} => true,
-            Inst::Imm { dst, imm: _ } => cx.check_reg_rc(dst, RegRef::Def, I32),
-            Inst::ImmF { dst, imm: _ } => cx.check_reg_rc(dst, RegRef::Def, F32),
+            Inst::Imm { dst, imm: _ } => cx.check_reg_rc(dst, RegRef::Def, I64),
+            Inst::ImmF { dst, imm: _ } => cx.check_reg_rc(dst, RegRef::Def, V128),
             // MakeRef and UseRef are like copy instructions; the typecheck only
             // reasons about register classes, not reffyness, so the
             // distinctions between the three are irrelevant here.
             Inst::Copy { dst, src } | Inst::MakeRef { dst, src } | Inst::UseRef { dst, src } => {
-                cx.check_reg_rc(src, RegRef::Use, I32) && cx.check_reg_rc(dst, RegRef::Def, I32)
+                cx.check_reg_rc(src, RegRef::Use, I64) && cx.check_reg_rc(dst, RegRef::Def, I64)
             }
             Inst::CopyF { dst, src } => {
-                cx.check_reg_rc(src, RegRef::Use, F32) && cx.check_reg_rc(dst, RegRef::Def, F32)
+                cx.check_reg_rc(src, RegRef::Use, V128) && cx.check_reg_rc(dst, RegRef::Def, V128)
             }
             Inst::Load { dst, addr } => {
-                addr.type_checks(cx) && cx.check_reg_rc(dst, RegRef::Def, I32)
+                addr.type_checks(cx) && cx.check_reg_rc(dst, RegRef::Def, I64)
             }
             Inst::LoadF { dst, addr } => {
-                addr.type_checks(cx) && cx.check_reg_rc(dst, RegRef::Def, F32)
+                addr.type_checks(cx) && cx.check_reg_rc(dst, RegRef::Def, V128)
             }
             Inst::Store { addr, src } => {
-                cx.check_reg_rc(src, RegRef::Use, I32) && addr.type_checks(cx)
+                cx.check_reg_rc(src, RegRef::Use, I64) && addr.type_checks(cx)
             }
             Inst::StoreF { addr, src } => {
-                cx.check_reg_rc(src, RegRef::Use, F32) && addr.type_checks(cx)
+                cx.check_reg_rc(src, RegRef::Use, V128) && addr.type_checks(cx)
             }
             Inst::Goto { target } => target.type_checks(cx),
             Inst::GotoCTF {
@@ -1125,13 +1125,13 @@ impl Inst {
                 target_true,
                 target_false,
             } => {
-                cx.check_reg_rc(cond, RegRef::Use, I32)
+                cx.check_reg_rc(cond, RegRef::Use, I64)
                     && target_true.type_checks(cx)
                     && target_false.type_checks(cx)
             }
             Inst::PrintS { .. } => true,
-            Inst::PrintI { reg } => cx.check_reg_rc(reg, RegRef::Use, I32),
-            Inst::PrintF { reg } => cx.check_reg_rc(reg, RegRef::Use, F32),
+            Inst::PrintI { reg } => cx.check_reg_rc(reg, RegRef::Use, I64),
+            Inst::PrintF { reg } => cx.check_reg_rc(reg, RegRef::Use, V128),
             Inst::Finish { reg } => reg.map_or(true, |reg| cx.check_reg(reg, RegRef::Use)),
             Inst::BinOp {
                 op: _,
@@ -1139,18 +1139,18 @@ impl Inst {
                 src_left,
                 src_right,
             } => {
-                cx.check_reg_rc(src_left, RegRef::Use, I32)
+                cx.check_reg_rc(src_left, RegRef::Use, I64)
                     && src_right.type_checks(cx)
-                    && cx.check_reg_rc(dst, RegRef::Def, I32)
+                    && cx.check_reg_rc(dst, RegRef::Def, I64)
             }
             Inst::BinOpM {
                 op: _,
                 dst,
                 src_right,
             } => {
-                cx.check_reg_rc(dst, RegRef::Use, I32)
+                cx.check_reg_rc(dst, RegRef::Use, I64)
                     && src_right.type_checks(cx)
-                    && cx.check_reg_rc(dst, RegRef::Def, I32)
+                    && cx.check_reg_rc(dst, RegRef::Def, I64)
             }
             Inst::BinOpF {
                 op: _,
@@ -1158,9 +1158,9 @@ impl Inst {
                 src_left,
                 src_right,
             } => {
-                cx.check_reg_rc(src_left, RegRef::Use, F32)
-                    && cx.check_reg_rc(src_right, RegRef::Use, F32)
-                    && cx.check_reg_rc(dst, RegRef::Def, F32)
+                cx.check_reg_rc(src_left, RegRef::Use, V128)
+                    && cx.check_reg_rc(src_right, RegRef::Use, V128)
+                    && cx.check_reg_rc(dst, RegRef::Def, V128)
             }
             Inst::Safepoint => true,
 
@@ -1181,7 +1181,7 @@ impl Inst {
 #[derive(Copy, Clone)]
 pub enum Value {
     U32(u32),
-    F32(f32),
+    V128(f32),
     Ref(u32),
 }
 
@@ -1193,8 +1193,8 @@ impl PartialEq for Value {
                 _ => false,
             },
 
-            Value::F32(x) => match other {
-                Value::F32(y) => (x.is_nan() && y.is_nan()) || x == y,
+            Value::V128(x) => match other {
+                Value::V128(y) => (x.is_nan() && y.is_nan()) || x == y,
                 _ => false,
             },
 
@@ -1210,15 +1210,15 @@ impl Value {
     fn to_u32(self) -> u32 {
         match self {
             Value::U32(n) => n,
-            Value::F32(_) => panic!("Value::toU32: this is a F32"),
+            Value::V128(_) => panic!("Value::toU32: this is a V128"),
             Value::Ref(_) => panic!("Value::toU32: this is a ref"),
         }
     }
     fn to_f32(self) -> f32 {
         match self {
-            Value::U32(_) => panic!("Value::toF32: this is a U32"),
-            Value::Ref(_) => panic!("Value::toF32: this is a ref"),
-            Value::F32(n) => n,
+            Value::U32(_) => panic!("Value::toV128: this is a U32"),
+            Value::Ref(_) => panic!("Value::toV128: this is a ref"),
+            Value::V128(n) => n,
         }
     }
     fn to_ref(self) -> u32 {
@@ -1230,14 +1230,14 @@ impl Value {
     fn cast_to_u32(self) -> u32 {
         match self {
             Value::U32(n) => n,
-            Value::F32(f) => f as u32,
+            Value::V128(f) => f as u32,
             Value::Ref(n) => n,
         }
     }
     fn cast_to_f32(self) -> f32 {
         match self {
             Value::U32(n) => n as f32,
-            Value::F32(f) => f,
+            Value::V128(f) => f,
             Value::Ref(n) => n as f32,
         }
     }
@@ -1247,7 +1247,7 @@ impl fmt::Debug for Value {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Value::U32(n) => write!(fmt, "{}", n),
-            Value::F32(n) => write!(fmt, "{}", n),
+            Value::V128(n) => write!(fmt, "{}", n),
             Value::Ref(n) => write!(fmt, "@{}", n),
         }
     }
@@ -1389,7 +1389,7 @@ impl<'a> IState<'a> {
             self.slots.resize(ix + 1, None);
         }
         debug_assert!(ix < self.slots.len());
-        self.slots[ix] = Some(Value::F32(val));
+        self.slots[ix] = Some(Value::V128(val));
     }
 
     fn get_reg(&self, reg: Reg) -> IResult<Value> {
@@ -1405,7 +1405,7 @@ impl<'a> IState<'a> {
     }
 
     fn set_reg_f32(&mut self, reg: Reg, val: f32) {
-        self.set_reg(reg, Value::F32(val))
+        self.set_reg(reg, Value::V128(val))
     }
 
     fn set_reg_ref(&mut self, reg: Reg, val: u32) {
@@ -1447,7 +1447,7 @@ impl<'a> IState<'a> {
         // No auto resizing of the memory
         match self.mem.get_mut(addr as usize) {
             None => return Err(format!("IState::set_mem_f32: invalid addr {}", addr))?,
-            Some(val_p) => *val_p = Some(Value::F32(val)),
+            Some(val_p) => *val_p = Some(Value::V128(val)),
         }
         Ok(())
     }
@@ -2416,7 +2416,7 @@ impl regalloc::Function for Func {
     }
 }
 
-/// Create a universe for testing, with nI32 `I32` class regs and nF32 `F32`
+/// Create a universe for testing, with nI64 `I64` class regs and nV128 `V128`
 /// class regs.
 pub fn make_universe(num_i32: usize, num_f32: usize) -> RealRegUniverse {
     let total_regs = num_i32 + num_f32;

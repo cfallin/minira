@@ -7,7 +7,7 @@ use std::iter::FromIterator;
 use crate::test_framework::{self as ir, *};
 use regalloc::*;
 
-pub const NUM_REAL_REGS_PER_RC: u8 = 4;
+pub const NUM_REAL_REGS_PER_RC: u8 = 8;
 const NUM_REG_CLASSES: u32 = 5;
 
 /// Maximum number of vregs.
@@ -86,8 +86,8 @@ impl FuzzingEnv {
             // real.
             // TODO there's insider knowledge about the real reg universe stuck here.
             let index = match rc {
-                RegClass::I32 => 0,
-                RegClass::F32 => NUM_REAL_REGS_PER_RC,
+                RegClass::I64 => 0,
+                RegClass::V128 => NUM_REAL_REGS_PER_RC,
                 _ => panic!("unexpected rc"),
             } + u8::arbitrary(u)? % NUM_REAL_REGS_PER_RC;
             Reg::new_real(rc, 0x0, index)
@@ -107,7 +107,7 @@ impl FuzzingEnv {
             }
             self.reftyped_regs.insert(index);
             let index = index + self.num_virtual_regs;
-            Ok(Reg::new_virtual(RegClass::I32, index as u32))
+            Ok(Reg::new_virtual(RegClass::I64, index as u32))
         } else {
             assert!(self.reftyped_regs.len() > 0);
             let list_index = usize::arbitrary(u)? % self.reftyped_regs.len();
@@ -119,7 +119,7 @@ impl FuzzingEnv {
                 .next()
                 .unwrap();
             let reg_index = reg_index + self.num_virtual_regs;
-            Ok(Reg::new_virtual(RegClass::I32, reg_index as u32))
+            Ok(Reg::new_virtual(RegClass::I64, reg_index as u32))
         }
     }
 
@@ -141,13 +141,13 @@ impl FuzzingEnv {
         let regs = Vec::from_iter(self.reftyped_regs.iter());
         let reg_index = *regs[usize::arbitrary(u)? % regs.len()];
         let reg_index = reg_index + self.num_virtual_regs;
-        Ok(Reg::new_virtual(RegClass::I32, reg_index as u32))
+        Ok(Reg::new_virtual(RegClass::I64, reg_index as u32))
     }
 
     fn get_ri(&self, u: &mut Unstructured) -> Result<RI> {
-        Ok(if self.can_use_reg(RegClass::I32) && bool::arbitrary(u)? {
+        Ok(if self.can_use_reg(RegClass::I64) && bool::arbitrary(u)? {
             RI::Reg {
-                reg: self.get_reg(RegClass::I32, u)?,
+                reg: self.get_reg(RegClass::I64, u)?,
             }
         } else {
             RI::Imm {
@@ -157,8 +157,8 @@ impl FuzzingEnv {
     }
 
     fn get_am(&self, u: &mut Unstructured) -> Result<AM> {
-        debug_assert!(self.can_use_reg(RegClass::I32));
-        let base = self.get_reg(RegClass::I32, u)?;
+        debug_assert!(self.can_use_reg(RegClass::I64));
+        let base = self.get_reg(RegClass::I64, u)?;
         Ok(if bool::arbitrary(u)? {
             // RI
             AM::RI {
@@ -167,7 +167,7 @@ impl FuzzingEnv {
             }
         } else {
             // RR
-            let offset = self.get_reg(RegClass::I32, u)?;
+            let offset = self.get_reg(RegClass::I64, u)?;
             AM::RR { base, offset }
         })
     }
@@ -194,33 +194,33 @@ impl FuzzingEnv {
         }
 
         let mut allowed_insts = Vec::new();
-        if self.can_def_reg(I32) {
+        if self.can_def_reg(I64) {
             allowed_insts.push(AllowedInst::Imm);
         }
-        if self.can_def_reg(F32) {
+        if self.can_def_reg(V128) {
             allowed_insts.push(AllowedInst::ImmF);
         }
-        if self.can_use_reg(I32) {
+        if self.can_use_reg(I64) {
             allowed_insts.push(AllowedInst::Copy);
             allowed_insts.push(AllowedInst::BinOp);
             allowed_insts.push(AllowedInst::BinOpM);
             allowed_insts.push(AllowedInst::Load);
             allowed_insts.push(AllowedInst::Store);
-            if self.can_def_reg(F32) {
+            if self.can_def_reg(V128) {
                 allowed_insts.push(AllowedInst::LoadF);
             }
-            if self.can_use_reg(F32) {
+            if self.can_use_reg(V128) {
                 allowed_insts.push(AllowedInst::StoreF);
             }
         }
-        if self.can_use_reg(F32) {
+        if self.can_use_reg(V128) {
             allowed_insts.push(AllowedInst::CopyF);
             allowed_insts.push(AllowedInst::BinOpF);
         }
-        if self.can_def_reftyped_reg() && self.can_use_reg(I32) {
+        if self.can_def_reftyped_reg() && self.can_use_reg(I64) {
             allowed_insts.push(AllowedInst::MakeRef);
         }
-        if self.can_use_reftyped_reg() && self.can_def_reg(I32) {
+        if self.can_use_reftyped_reg() && self.can_def_reg(I64) {
             allowed_insts.push(AllowedInst::UseRef);
         }
         if self.can_def_reftyped_reg() && self.can_use_reftyped_reg() {
@@ -237,24 +237,24 @@ impl FuzzingEnv {
         // Get uses before defs!
         Ok(match allowed_insts[index] {
             AllowedInst::Imm => Imm {
-                dst: self.def_reg(I32, u)?,
+                dst: self.def_reg(I64, u)?,
                 imm: u32::arbitrary(u)?,
             },
             AllowedInst::ImmF => ImmF {
-                dst: self.def_reg(F32, u)?,
+                dst: self.def_reg(V128, u)?,
                 imm: f32::arbitrary(u)?,
             },
             AllowedInst::Copy => {
-                let src = self.get_reg(I32, u)?;
+                let src = self.get_reg(I64, u)?;
                 Copy {
-                    dst: self.def_reg(I32, u)?,
+                    dst: self.def_reg(I64, u)?,
                     src,
                 }
             }
             AllowedInst::CopyF => {
-                let src = self.get_reg(F32, u)?;
+                let src = self.get_reg(V128, u)?;
                 CopyF {
-                    dst: self.def_reg(F32, u)?,
+                    dst: self.def_reg(V128, u)?,
                     src,
                 }
             }
@@ -264,26 +264,26 @@ impl FuzzingEnv {
                 Copy { dst, src }
             }
             AllowedInst::BinOp => {
-                let src_left = self.get_reg(I32, u)?;
+                let src_left = self.get_reg(I64, u)?;
                 let src_right = self.get_ri(u)?;
                 BinOp {
                     op: ir::BinOp::arbitrary(u)?,
-                    dst: self.def_reg(I32, u)?,
+                    dst: self.def_reg(I64, u)?,
                     src_left,
                     src_right,
                 }
             }
             AllowedInst::BinOpM => BinOpM {
                 op: ir::BinOp::arbitrary(u)?,
-                dst: self.mod_reg(I32, u)?,
+                dst: self.mod_reg(I64, u)?,
                 src_right: self.get_ri(u)?,
             },
             AllowedInst::BinOpF => {
-                let src_left = self.get_reg(F32, u)?;
-                let src_right = self.get_reg(F32, u)?;
+                let src_left = self.get_reg(V128, u)?;
+                let src_right = self.get_reg(V128, u)?;
                 BinOpF {
                     op: ir::BinOpF::arbitrary(u)?,
-                    dst: self.def_reg(F32, u)?,
+                    dst: self.def_reg(V128, u)?,
                     src_left,
                     src_right,
                 }
@@ -291,31 +291,31 @@ impl FuzzingEnv {
             AllowedInst::Load => {
                 let addr = self.get_am(u)?;
                 Load {
-                    dst: self.def_reg(I32, u)?,
+                    dst: self.def_reg(I64, u)?,
                     addr,
                 }
             }
             AllowedInst::LoadF => {
                 let addr = self.get_am(u)?;
                 LoadF {
-                    dst: self.def_reg(F32, u)?,
+                    dst: self.def_reg(V128, u)?,
                     addr,
                 }
             }
             AllowedInst::Store => Store {
                 addr: self.get_am(u)?,
-                src: self.get_reg(I32, u)?,
+                src: self.get_reg(I64, u)?,
             },
             AllowedInst::StoreF => StoreF {
                 addr: self.get_am(u)?,
-                src: self.get_reg(F32, u)?,
+                src: self.get_reg(V128, u)?,
             },
             AllowedInst::MakeRef => MakeRef {
                 dst: self.def_reftyped_reg(u)?,
-                src: self.get_reg(I32, u)?,
+                src: self.get_reg(I64, u)?,
             },
             AllowedInst::UseRef => UseRef {
-                dst: self.def_reg(I32, u)?,
+                dst: self.def_reg(I64, u)?,
                 src: self.get_reftyped_reg(u)?,
             },
         })
@@ -332,14 +332,14 @@ impl FuzzingEnv {
         }
 
         let mut allowed_insts = vec![AllowedInst::Goto, AllowedInst::Finish];
-        if self.can_use_reg(I32) {
+        if self.can_use_reg(I64) {
             allowed_insts.push(AllowedInst::GotoCtf);
         }
 
         Ok(
             match allowed_insts[u8::arbitrary(u)? as usize % allowed_insts.len()] {
                 AllowedInst::GotoCtf => GotoCTF {
-                    cond: self.get_reg(I32, u)?,
+                    cond: self.get_reg(I64, u)?,
                     target_true: self.label(u)?,
                     target_false: self.label(u)?,
                 },
@@ -348,10 +348,10 @@ impl FuzzingEnv {
                 },
                 AllowedInst::Finish => {
                     let ret_value = if bool::arbitrary(u)? {
-                        if self.can_use_reg(I32) {
-                            Some(self.get_reg(I32, u)?)
-                        } else if self.can_use_reg(F32) {
-                            Some(self.get_reg(F32, u)?)
+                        if self.can_use_reg(I64) {
+                            Some(self.get_reg(I64, u)?)
+                        } else if self.can_use_reg(V128) {
+                            Some(self.get_reg(V128, u)?)
                         } else {
                             None
                         }
