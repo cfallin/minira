@@ -492,7 +492,6 @@ pub(crate) fn finalize<'a, F: Function>(
             // i + 1 because of entry inst.
             let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i + 1));
             while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
-                assert_eq!(out.edits[edit_idx].0, pos);
                 match &out.edits[edit_idx].1 {
                     &regalloc2::Edit::Move { from, to } => {
                         for inst in edit_insts(&shim, from, to, Some(&mut clobbers)) {
