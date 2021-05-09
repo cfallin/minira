@@ -16,6 +16,7 @@ static mut COUNTER_GEN: usize = 0;
 static mut COUNTER_OK: usize = 0;
 
 fuzz_target!(|func: ir::Func| {
+    let _ = env_logger::try_init();
     let n_gen = unsafe {
         COUNTER_GEN += 1;
         COUNTER_GEN
