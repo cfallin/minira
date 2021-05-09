@@ -27,6 +27,13 @@ fuzz_target!(|func: ir::Func| {
         n_gen, n_ok
     );
 
+    for inst in func.insns.iter() {
+        // We haven't wired up safepoint metadata in the shim yet.
+        if matches!(inst, ir::Inst::Safepoint) {
+            return;
+        }
+    }
+
     log::debug!("BEGIN INPUT:");
     let mut rendered = String::new();
     func.render("==== fuzz_regalloc2.rs: input:", &mut rendered)
