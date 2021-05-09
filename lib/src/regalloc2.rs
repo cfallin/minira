@@ -607,10 +607,13 @@ impl<'a, F: Function> Shim<'a, F> {
         }
     }
 
-    fn translate_reg_to_policy(&self, _reg: Reg) -> regalloc2::OperandPolicy {
-        // We use the pinned-register mechanism to pin RealReg vregs,
-        // so we don't need a fixed-reg policy here.
-        regalloc2::OperandPolicy::Reg
+    fn translate_reg_to_policy(&self, reg: Reg) -> regalloc2::OperandPolicy {
+        if reg.is_real() {
+            let preg = self.translate_realreg_to_preg(reg.to_real_reg());
+            regalloc2::OperandPolicy::FixedReg(preg)
+        } else {
+            regalloc2::OperandPolicy::Reg
+        }
     }
 }
 
@@ -740,14 +743,6 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
 
     fn multi_spillslot_named_by_last_slot(&self) -> bool {
         false
-    }
-
-    fn is_pinned_vreg(&self, vreg: regalloc2::VReg) -> Option<regalloc2::PReg> {
-        if vreg.vreg() < self.vreg_offset {
-            Some(regalloc2::PReg::from_index(vreg.vreg()))
-        } else {
-            None
-        }
     }
 }
 
