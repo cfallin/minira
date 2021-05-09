@@ -13,6 +13,7 @@ libfuzzer-sys = "0.3"
 minira-util = { path = ".." }
 regalloc = { path = "../lib", features = ["fuzzing"] }
 env_logger = "*"
+log = "*"
 
 [[bin]]
 name = "bt"

@@ -27,14 +27,12 @@ fuzz_target!(|func: ir::Func| {
         n_gen, n_ok
     );
 
-    if false {
-        println!("BEGIN INPUT:");
-        let mut rendered = String::new();
-        func.render("==== fuzz_regalloc2.rs: input:", &mut rendered)
-            .unwrap();
-        println!("{}", rendered);
-        println!("END INPUT:");
-    }
+    log::debug!("BEGIN INPUT:");
+    let mut rendered = String::new();
+    func.render("==== fuzz_regalloc2.rs: input:", &mut rendered)
+        .unwrap();
+    log::debug!("{}", rendered);
+    log::debug!("END INPUT:");
 
     let mut func = func;
 

@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use crate::analysis_main::AnalysisError;
 use crate::checker::{CheckerContext, CheckerErrors};
 use crate::data_structures::RegVecs;
 use crate::inst_stream::{ExtPoint, InstExtPoint, InstToInsert, InstToInsertAndExtPoint};
@@ -773,7 +774,14 @@ pub(crate) fn run<F: Function>(
     opts: &Regalloc2Options,
 ) -> Result<RegAllocResult<F>, RegAllocError> {
     let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts);
-    let result = regalloc2::run(&ra2_func, &env)
-        .map_err(|err| RegAllocError::Other(format!("{:?}", err)))?;
+    let result = regalloc2::run(&ra2_func, &env).map_err(|err| match err {
+        regalloc2::RegAllocError::CritEdge(from, to) => {
+            RegAllocError::Analysis(AnalysisError::CriticalEdge {
+                from: BlockIx::new(from.index() as u32),
+                to: BlockIx::new(to.index() as u32),
+            })
+        }
+        _ => RegAllocError::Other(format!("{:?}", err)),
+    })?;
     finalize(ra2_func, result, run_checker)
 }
