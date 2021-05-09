@@ -304,11 +304,15 @@ fn edit_insts<'a, F: Function>(
     shim: &Shim<'a, F>,
     from: regalloc2::Allocation,
     to: regalloc2::Allocation,
+    clobbers: Option<&mut Set<RealReg>>,
 ) -> SmallVec<[InstToInsert; 2]> {
     if from.is_reg() && to.is_reg() {
         assert_eq!(to.as_reg().unwrap().class(), from.as_reg().unwrap().class());
         let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
+        if let Some(clobbers) = clobbers {
+            clobbers.insert(to);
+        }
         assert_eq!(to.get_class(), from.get_class());
         smallvec![InstToInsert::Move {
             to_reg: Writable::from_reg(to),
@@ -326,6 +330,9 @@ fn edit_insts<'a, F: Function>(
     } else if from.is_stack() && to.is_reg() {
         let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
+        if let Some(clobbers) = clobbers {
+            clobbers.insert(to);
+        }
         smallvec![InstToInsert::Reload {
             to_reg: Writable::from_reg(to),
             from_slot: from,
@@ -337,6 +344,9 @@ fn edit_insts<'a, F: Function>(
         let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
         let scratch =
             shim.rregs_by_preg_index[shim.extra_scratch_by_class[rc as u8 as usize].index()];
+        if let Some(clobbers) = clobbers {
+            clobbers.insert(scratch);
+        }
         smallvec![
             InstToInsert::Reload {
                 to_reg: Writable::from_reg(scratch),
@@ -438,20 +448,10 @@ fn compute_insts_to_add<'a, F: Function>(
 ) -> Vec<InstToInsertAndExtPoint> {
     let mut ret = vec![];
     for (pos, edit) in &out.edits {
-        let pos = if pos.inst().index() == 0 {
-            InstExtPoint::new(InstIx::new(0), ExtPoint::Reload)
-        } else {
-            InstExtPoint::new(
-                InstIx::new((pos.inst().index() - 1) as u32),
-                match pos.pos() {
-                    regalloc2::InstPosition::Before => ExtPoint::Reload,
-                    regalloc2::InstPosition::After => ExtPoint::Spill,
-                },
-            )
-        };
+        let pos = shim.translate_pos(*pos);
         match edit {
             &regalloc2::Edit::Move { from, to } => {
-                for edit in edit_insts(shim, from, to) {
+                for edit in edit_insts(shim, from, to, None) {
                     ret.push(InstToInsertAndExtPoint::new(edit, pos.clone()));
                 }
             }
@@ -495,7 +495,7 @@ pub(crate) fn finalize<'a, F: Function>(
                 assert_eq!(out.edits[edit_idx].0, pos);
                 match &out.edits[edit_idx].1 {
                     &regalloc2::Edit::Move { from, to } => {
-                        for inst in edit_insts(&shim, from, to) {
+                        for inst in edit_insts(&shim, from, to, Some(&mut clobbers)) {
                             new_insns.push(inst.construct(shim.func).unwrap());
                             orig_insn_map.push(InstIx::invalid_value());
                         }
@@ -528,7 +528,7 @@ pub(crate) fn finalize<'a, F: Function>(
                 assert_eq!(out.edits[edit_idx].0, pos);
                 match &out.edits[edit_idx].1 {
                     &regalloc2::Edit::Move { from, to } => {
-                        for inst in edit_insts(&shim, from, to) {
+                        for inst in edit_insts(&shim, from, to, Some(&mut clobbers)) {
                             new_insns.push(inst.construct(shim.func).unwrap());
                             orig_insn_map.push(InstIx::invalid_value());
                         }
@@ -614,6 +614,24 @@ impl<'a, F: Function> Shim<'a, F> {
         } else {
             regalloc2::OperandPolicy::Reg
         }
+    }
+
+    fn translate_pos(&self, pos: regalloc2::ProgPoint) -> InstExtPoint {
+        if pos.inst().index() == 0 {
+            // We insert a virtual livein-producing instruction at
+            // inst 0, so inst 0 per regalloc2 is pre-inst 0 for the
+            // regalloc.rs client.
+            return InstExtPoint::new(InstIx::new(0), ExtPoint::Reload);
+        }
+        let inst = InstIx::new((pos.inst().index() - 1) as u32);
+
+        InstExtPoint::new(
+            inst,
+            match pos.pos() {
+                regalloc2::InstPosition::Before => ExtPoint::Reload,
+                regalloc2::InstPosition::After => ExtPoint::Spill,
+            },
+        )
     }
 }
 
