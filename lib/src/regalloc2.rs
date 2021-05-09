@@ -752,8 +752,8 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
 
 #[derive(Clone, Debug)]
 pub struct Regalloc2Options {
-    num_int_preferred: usize,
-    num_float_preferred: usize,
+    pub num_int_preferred: usize,
+    pub num_float_preferred: usize,
 }
 
 impl std::default::Default for Regalloc2Options {

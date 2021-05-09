@@ -45,7 +45,10 @@ fuzz_target!(|func: ir::Func| {
     let opts = regalloc::Options {
         run_checker: true,
 
-        algorithm: regalloc::Algorithm::Regalloc2(Default::default()),
+        algorithm: regalloc::Algorithm::Regalloc2(regalloc::Regalloc2Options {
+            num_int_preferred: 4,
+            num_float_preferred: 4,
+        }),
     };
 
     let sri = func.get_stackmap_request();
