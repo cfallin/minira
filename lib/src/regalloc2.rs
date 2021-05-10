@@ -710,7 +710,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
         self.safepoints.get(insn.index())
     }
 
-    fn is_move(&self, insn: regalloc2::Inst) -> Option<(regalloc2::VReg, regalloc2::VReg)> {
+    fn is_move(&self, insn: regalloc2::Inst) -> Option<(regalloc2::Operand, regalloc2::Operand)> {
         if insn.index() == 0 {
             return None;
         }
@@ -719,9 +719,23 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
         self.func
             .is_move(inst)
             .map(|(dst, src)| {
+                let src_policy = self.translate_reg_to_policy(src);
+                let dst_policy = self.translate_reg_to_policy(dst.to_reg());
+                let src_vreg = self.translate_reg_to_vreg(src);
+                let dst_vreg = self.translate_reg_to_vreg(dst.to_reg());
                 (
-                    self.translate_reg_to_vreg(src),
-                    self.translate_reg_to_vreg(dst.to_reg()),
+                    regalloc2::Operand::new(
+                        src_vreg,
+                        src_policy,
+                        regalloc2::OperandKind::Use,
+                        regalloc2::OperandPos::Before,
+                    ),
+                    regalloc2::Operand::new(
+                        dst_vreg,
+                        dst_policy,
+                        regalloc2::OperandKind::Def,
+                        regalloc2::OperandPos::After,
+                    ),
                 )
             })
             .filter(|(dst, src)| dst.class() == src.class())
