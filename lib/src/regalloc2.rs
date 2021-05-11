@@ -809,5 +809,6 @@ pub(crate) fn run<F: Function>(
         }
         _ => RegAllocError::Other(format!("{:?}", err)),
     })?;
+    log::info!("regalloc2 stats: {:?}", result.stats);
     finalize(ra2_func, result, run_checker)
 }
