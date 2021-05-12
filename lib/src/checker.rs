@@ -59,7 +59,7 @@ use crate::data_structures::{
     BlockIx, InstIx, Map, RealReg, RealRegUniverse, Reg, RegSets, SpillSlot, VirtualReg, Writable,
 };
 use crate::inst_stream::{ExtPoint, InstExtPoint, InstToInsertAndExtPoint};
-use crate::{analysis_data_flow::get_san_reg_sets_for_insn, StackmapRequestInfo};
+use crate::{analysis_data_flow::get_raw_reg_sets_for_insn, StackmapRequestInfo};
 use crate::{Function, RegUsageMapper};
 
 use rustc_hash::FxHashSet;
@@ -535,7 +535,6 @@ impl Checker {
             inst_ix.get(),
             regsets
         );
-        assert!(regsets.is_sanitized());
         let mut uses_set = regsets.uses.clone();
         let mut defs_set = regsets.defs.clone();
         uses_set.union(&regsets.mods);
@@ -697,7 +696,7 @@ impl CheckerContext {
     /// within a block must be visited in program order.
     pub(crate) fn handle_insn<F: Function, RUM: RegUsageMapper>(
         &mut self,
-        ru: &RealRegUniverse,
+        _ru: &RealRegUniverse,
         bix: BlockIx,
         iix: InstIx,
         insn: &F::Inst,
@@ -722,9 +721,7 @@ impl CheckerContext {
         }
 
         if !skip_inst {
-            let regsets = get_san_reg_sets_for_insn::<F>(insn, ru)
-                .expect("only existing real registers at this point");
-            assert!(regsets.is_sanitized());
+            let regsets = get_raw_reg_sets_for_insn::<F>(insn);
 
             debug!(
                 "at inst {:?}: regsets {:?} mapper {:?}",
