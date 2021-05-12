@@ -460,7 +460,13 @@ fn map_vregs_to_rregs<F: Function>(
         if let &mut Some(ref mut checker) = &mut checker {
             let block_ix = insn_blocks[insn_ix.get() as usize];
             checker
-                .handle_insn(reg_universe, func, block_ix, insn_ix, &mapper)
+                .handle_insn::<F, _>(
+                    reg_universe,
+                    block_ix,
+                    insn_ix,
+                    func.get_insn(insn_ix),
+                    &mapper,
+                )
                 .unwrap();
         }
 

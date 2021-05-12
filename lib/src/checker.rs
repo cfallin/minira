@@ -483,6 +483,7 @@ impl Checker {
         let mut bb_insts = Map::default();
 
         for block in f.blocks() {
+            log::debug!("checker: creating block {:?}", block);
             bb_in.insert(block, Default::default());
             bb_succs.insert(block, f.block_succs(block).to_vec());
             bb_insts.insert(block, vec![]);
@@ -506,6 +507,7 @@ impl Checker {
     /// Can also accept an `Inst::Op`, but `add_op()` is better-suited
     /// for this.
     pub(crate) fn add_inst(&mut self, block: BlockIx, inst: Inst) {
+        log::debug!("checker: block {:?}: add_inst {:?}", block, inst);
         let insts = self.bb_insts.get_mut(&block).unwrap();
         insts.push(inst);
     }
@@ -690,9 +692,9 @@ impl CheckerContext {
     pub(crate) fn handle_insn<F: Function, RUM: RegUsageMapper>(
         &mut self,
         ru: &RealRegUniverse,
-        func: &F,
         bix: BlockIx,
         iix: InstIx,
+        insn: &F::Inst,
         mapper: &RUM,
     ) -> Result<(), CheckerErrors> {
         let empty = vec![];
@@ -714,7 +716,7 @@ impl CheckerContext {
         }
 
         if !skip_inst {
-            let regsets = get_san_reg_sets_for_insn::<F>(func.get_insn(iix), ru)
+            let regsets = get_san_reg_sets_for_insn::<F>(insn, ru)
                 .expect("only existing real registers at this point");
             assert!(regsets.is_sanitized());
 

@@ -426,7 +426,7 @@ fn edit_insn_registers<'a, F: Function>(
     F::map_regs(insn, &mapper);
 
     if let Some(checker) = checker.as_mut() {
-        checker.handle_insn(shim.rru, shim.func, bix, iix, &mapper)?;
+        checker.handle_insn::<F, _>(shim.rru, bix, iix, insn, &mapper)?;
     }
 
     if shim.func.is_included_in_clobbers(insn) {
