@@ -55,6 +55,26 @@ pub struct IRSnapshot {
     pub func: IRFunction,
 }
 
+impl std::fmt::Debug for IRFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        writeln!(f, "IRFunction {{{{")?;
+        for livein in self.func_liveins().iter() {
+            writeln!(f, "  livein: {:?}", livein)?;
+        }
+        for liveout in self.func_liveouts().iter() {
+            writeln!(f, "  liveout: {:?}", liveout)?;
+        }
+        for block in self.blocks() {
+            writeln!(f, "{:?}:", block)?;
+            for inst in self.block_insns(block) {
+                writeln!(f, "  {:?}: {:?}", inst, self.get_insn(inst))?;
+            }
+        }
+        writeln!(f, "}}}}")?;
+        Ok(())
+    }
+}
+
 impl IRSnapshot {
     fn new_inst<F: Function>(func: &F, ix: InstIx, inst: &F::Inst) -> IRInst {
         let mut reg_vecs = RegVecs::new(/* sanitized */ false);

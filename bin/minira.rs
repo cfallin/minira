@@ -244,6 +244,7 @@ fn run_snapshot(path: &str, opts: Options, quiet: bool) {
                 snapshot.func.insns().len()
             );
         }
+        log::debug!("snapshot func:\n{:?}", snapshot.func);
         match snapshot.allocate(opts.clone()) {
             Ok(result) => {
                 if !quiet {

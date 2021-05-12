@@ -365,6 +365,10 @@ impl CheckerState {
                 self.spill_slots
                     .insert(slot, CheckerValue::Reg(to_reg, reftyped));
             }
+            &Inst::DefSlot { to_slot, for_reg } => {
+                self.spill_slots
+                    .insert(to_slot, CheckerValue::Reg(for_reg, false));
+            }
             &Inst::Spill { into, from } => {
                 let val = self
                     .reg_values
@@ -412,6 +416,8 @@ pub(crate) enum Inst {
         from_reg: Reg,
         to_reg: Reg,
     },
+    /// Similar to above, but just a def without a check. Used for regalloc2 checker.
+    DefSlot { to_slot: SpillSlot, for_reg: Reg },
     /// A regular instruction with fixed use and def slots. Contains both
     /// the original registers (as given to the regalloc) and the allocated ones.
     Op {

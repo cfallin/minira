@@ -43,6 +43,16 @@ pub(crate) enum InstToInsert {
         from_reg: Reg,
         to_reg: Reg,
     },
+    /// A definition of a Reg in a given RealReg. No machine code is
+    /// generated, but used to sync the checker with the effect of a
+    /// move that comes from a user move. Only used with regalloc2's
+    /// checker integration.
+    DefReg {
+        to_reg: Writable<RealReg>,
+        for_reg: Reg,
+    },
+    /// As for DefReg, for for spillslots.
+    DefSlot { to_slot: SpillSlot, for_reg: Reg },
 }
 
 impl InstToInsert {
@@ -64,6 +74,8 @@ impl InstToInsert {
                 for_vreg,
             } => Some(f.gen_move(to_reg, from_reg, for_vreg)),
             &InstToInsert::ChangeSpillSlotOwnership { .. } => None,
+            &InstToInsert::DefReg { .. } => None,
+            &InstToInsert::DefSlot { .. } => None,
         }
     }
 
@@ -98,6 +110,17 @@ impl InstToInsert {
                 from_reg,
                 to_reg,
             },
+            &InstToInsert::DefReg { to_reg, for_reg } => CheckerInst::Op {
+                inst_ix: InstIx::invalid_value(),
+                uses_orig: vec![],
+                uses: vec![],
+                defs_orig: vec![for_reg],
+                defs: vec![to_reg.to_reg()],
+                defs_reftyped: vec![false],
+            },
+            &InstToInsert::DefSlot { to_slot, for_reg } => {
+                CheckerInst::DefSlot { to_slot, for_reg }
+            }
         }
     }
 }

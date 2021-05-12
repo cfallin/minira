@@ -219,8 +219,9 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
 
     // Create a virtual entry instruction with livein defs.
     for &livein in shim.func.func_liveins().iter() {
-        shim.operands.push(regalloc2::Operand::reg_def(
+        shim.operands.push(regalloc2::Operand::reg_fixed_def(
             shim.translate_realreg_to_vreg(livein),
+            shim.pregs_by_rreg_index[livein.get_index()],
         ));
     }
     shim.operand_ranges.push((0, shim.operands.len() as u32));
@@ -235,7 +236,8 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         let start = shim.operands.len();
         if shim.func.is_move(insn).is_some() {
             moves += 1;
-            // Moves are handled specially by the regalloc.
+            // Moves are handled specially by the regalloc. We don't
+            // need to generate any operands at all.
             shim.operand_ranges.push((start as u32, start as u32));
             continue;
         }
@@ -272,8 +274,9 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         // If this is a return, use all liveouts.
         if shim.func.is_ret(InstIx::new(i as u32)) {
             for &liveout in shim.func.func_liveouts().iter() {
-                shim.operands.push(regalloc2::Operand::reg_use(
+                shim.operands.push(regalloc2::Operand::reg_fixed_use(
                     shim.translate_realreg_to_vreg(liveout),
+                    shim.pregs_by_rreg_index[liveout.get_index()],
                 ));
             }
         }
@@ -304,40 +307,65 @@ fn edit_insts<'a, F: Function>(
     shim: &Shim<'a, F>,
     from: regalloc2::Allocation,
     to: regalloc2::Allocation,
+    to_vreg: Option<regalloc2::VReg>,
     clobbers: Option<&mut Set<RealReg>>,
 ) -> SmallVec<[InstToInsert; 2]> {
+    let mut ret = smallvec![];
     if from.is_reg() && to.is_reg() {
         assert_eq!(to.as_reg().unwrap().class(), from.as_reg().unwrap().class());
         let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
-        if let Some(clobbers) = clobbers {
-            clobbers.insert(to);
+        if to != from {
+            if let Some(clobbers) = clobbers {
+                clobbers.insert(to);
+            }
+            assert_eq!(to.get_class(), from.get_class());
+            ret.push(InstToInsert::Move {
+                to_reg: Writable::from_reg(to),
+                from_reg: from,
+                for_vreg: None,
+            });
         }
-        assert_eq!(to.get_class(), from.get_class());
-        smallvec![InstToInsert::Move {
-            to_reg: Writable::from_reg(to),
-            from_reg: from,
-            for_vreg: None
-        }]
+        if let Some(to_vreg) = to_vreg {
+            let for_reg = shim.translate_vreg_to_reg(to_vreg);
+            ret.push(InstToInsert::DefReg {
+                to_reg: Writable::from_reg(to),
+                for_reg,
+            });
+        }
     } else if from.is_reg() && to.is_stack() {
         let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
         let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
-        smallvec![InstToInsert::Spill {
+        ret.push(InstToInsert::Spill {
             to_slot: to,
             from_reg: from,
-            for_vreg: None
-        }]
+            for_vreg: None,
+        });
+        if let Some(to_vreg) = to_vreg {
+            let for_reg = shim.translate_vreg_to_reg(to_vreg);
+            ret.push(InstToInsert::DefSlot {
+                to_slot: to,
+                for_reg,
+            });
+        }
     } else if from.is_stack() && to.is_reg() {
         let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
         if let Some(clobbers) = clobbers {
             clobbers.insert(to);
         }
-        smallvec![InstToInsert::Reload {
+        ret.push(InstToInsert::Reload {
             to_reg: Writable::from_reg(to),
             from_slot: from,
-            for_vreg: None
-        }]
+            for_vreg: None,
+        });
+        if let Some(to_vreg) = to_vreg {
+            let for_reg = shim.translate_vreg_to_reg(to_vreg);
+            ret.push(InstToInsert::DefReg {
+                to_reg: Writable::from_reg(to),
+                for_reg,
+            });
+        }
     } else {
         let rc = from.class();
         let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
@@ -347,19 +375,25 @@ fn edit_insts<'a, F: Function>(
         if let Some(clobbers) = clobbers {
             clobbers.insert(scratch);
         }
-        smallvec![
-            InstToInsert::Reload {
-                to_reg: Writable::from_reg(scratch),
-                from_slot: from,
-                for_vreg: None
-            },
-            InstToInsert::Spill {
+        ret.push(InstToInsert::Reload {
+            to_reg: Writable::from_reg(scratch),
+            from_slot: from,
+            for_vreg: None,
+        });
+        ret.push(InstToInsert::Spill {
+            to_slot: to,
+            from_reg: scratch,
+            for_vreg: None,
+        });
+        if let Some(to_vreg) = to_vreg {
+            let for_reg = shim.translate_vreg_to_reg(to_vreg);
+            ret.push(InstToInsert::DefSlot {
                 to_slot: to,
-                from_reg: scratch,
-                for_vreg: None,
-            },
-        ]
+                for_reg,
+            });
+        }
     }
+    ret
 }
 
 struct Mapper<'a, 'b, F: Function> {
@@ -378,7 +412,7 @@ impl<'a, 'b, F: Function> Mapper<'a, 'b, F> {
     fn get_vreg_at_point(&self, vreg: VirtualReg, pos: regalloc2::OperandPos) -> Option<RealReg> {
         let vreg = self.shim.translate_virtualreg_to_vreg(vreg);
         for (i, op) in self.operands.iter().enumerate() {
-            if op.vreg() == vreg && op.pos() == pos {
+            if op.vreg() == vreg && (op.pos() == pos || op.kind() == regalloc2::OperandKind::Mod) {
                 if self.allocs[i].is_reg() {
                     return Some(
                         self.shim.rregs_by_preg_index[self.allocs[i].as_reg().unwrap().index()],
@@ -423,11 +457,13 @@ fn edit_insn_registers<'a, F: Function>(
         operands,
         allocs,
     };
-    F::map_regs(insn, &mapper);
+    log::debug!("iix {:?}: mapper {:?}", iix, mapper);
 
     if let Some(checker) = checker.as_mut() {
         checker.handle_insn::<F, _>(shim.rru, bix, iix, insn, &mapper)?;
     }
+
+    F::map_regs(insn, &mapper);
 
     if shim.func.is_included_in_clobbers(insn) {
         for (op, alloc) in operands.iter().zip(allocs.iter()) {
@@ -442,6 +478,24 @@ fn edit_insn_registers<'a, F: Function>(
     Ok(())
 }
 
+fn handle_nop<'a, F: Function>(
+    shim: &Shim<'a, F>,
+    bix: BlockIx,
+    iix: InstIx,
+    checker: &mut Option<CheckerContext>,
+) -> Result<(), CheckerErrors> {
+    if let Some(checker) = checker.as_mut() {
+        let mapper = Mapper {
+            shim,
+            operands: &[],
+            allocs: &[],
+        };
+        let nop = shim.func.gen_zero_len_nop();
+        checker.handle_insn::<F, _>(shim.rru, bix, iix, &nop, &mapper)?;
+    }
+    Ok(())
+}
+
 fn compute_insts_to_add<'a, F: Function>(
     shim: &Shim<'a, F>,
     out: &regalloc2::Output,
@@ -450,9 +504,11 @@ fn compute_insts_to_add<'a, F: Function>(
     for (pos, edit) in &out.edits {
         let pos = shim.translate_pos(*pos);
         match edit {
-            &regalloc2::Edit::Move { from, to } => {
-                for edit in edit_insts(shim, from, to, None) {
-                    ret.push(InstToInsertAndExtPoint::new(edit, pos.clone()));
+            &regalloc2::Edit::Move { from, to, to_vreg } => {
+                for edit in edit_insts(shim, from, to, to_vreg, None) {
+                    let inst_iep = InstToInsertAndExtPoint::new(edit, pos.clone());
+                    log::debug!("inst_to_add: {:?}", inst_iep);
+                    ret.push(inst_iep);
                 }
             }
             _ => {}
@@ -477,12 +533,20 @@ pub(crate) fn finalize<'a, F: Function>(
         None
     };
 
+    if log::log_enabled!(log::Level::Debug) {
+        log::debug!("regalloc2 shim: edits:");
+        for edit in &out.edits {
+            log::debug!(" edit: {:?}", edit);
+        }
+    }
+
     let mut new_insns = vec![];
     let nop = shim.func.gen_zero_len_nop();
     let mut edit_idx = 0;
     let mut target_map: TypedIxVec<BlockIx, InstIx> = TypedIxVec::new();
     let mut orig_insn_map: TypedIxVec<InstIx, InstIx> = TypedIxVec::new();
     let mut clobbers = Set::empty();
+
     for block in shim.func.blocks() {
         target_map.push(InstIx::new(new_insns.len() as u32));
         for iix in shim.func.block_insns(block) {
@@ -493,8 +557,8 @@ pub(crate) fn finalize<'a, F: Function>(
             let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i + 1));
             while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
                 match &out.edits[edit_idx].1 {
-                    &regalloc2::Edit::Move { from, to } => {
-                        for inst in edit_insts(&shim, from, to, Some(&mut clobbers)) {
+                    &regalloc2::Edit::Move { from, to, .. } => {
+                        for inst in edit_insts(&shim, from, to, None, Some(&mut clobbers)) {
                             new_insns.push(inst.construct(shim.func).unwrap());
                             orig_insn_map.push(InstIx::invalid_value());
                         }
@@ -520,14 +584,17 @@ pub(crate) fn finalize<'a, F: Function>(
                 .map_err(|err| RegAllocError::RegChecker(err))?;
                 orig_insn_map.push(iix);
                 new_insns.push(insn);
+            } else {
+                handle_nop(&shim, block, iix, &mut checker)
+                    .map_err(|err| RegAllocError::RegChecker(err))?;
             }
 
             let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i + 1));
             while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
                 assert_eq!(out.edits[edit_idx].0, pos);
                 match &out.edits[edit_idx].1 {
-                    &regalloc2::Edit::Move { from, to } => {
-                        for inst in edit_insts(&shim, from, to, Some(&mut clobbers)) {
+                    &regalloc2::Edit::Move { from, to, .. } => {
+                        for inst in edit_insts(&shim, from, to, None, Some(&mut clobbers)) {
                             new_insns.push(inst.construct(shim.func).unwrap());
                             orig_insn_map.push(InstIx::invalid_value());
                         }
@@ -540,6 +607,7 @@ pub(crate) fn finalize<'a, F: Function>(
     }
 
     if let Some(checker) = checker.take() {
+        log::debug!("running checker");
         checker
             .run()
             .map_err(|err| RegAllocError::RegChecker(err))?;
