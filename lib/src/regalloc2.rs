@@ -559,8 +559,10 @@ pub(crate) fn finalize<'a, F: Function>(
                 match &out.edits[edit_idx].1 {
                     &regalloc2::Edit::Move { from, to, .. } => {
                         for inst in edit_insts(&shim, from, to, None, Some(&mut clobbers)) {
-                            new_insns.push(inst.construct(shim.func).unwrap());
-                            orig_insn_map.push(InstIx::invalid_value());
+                            if let Some(insn) = inst.construct(shim.func) {
+                                new_insns.push(insn);
+                                orig_insn_map.push(InstIx::invalid_value());
+                            }
                         }
                     }
                     _ => {}
@@ -595,8 +597,10 @@ pub(crate) fn finalize<'a, F: Function>(
                 match &out.edits[edit_idx].1 {
                     &regalloc2::Edit::Move { from, to, .. } => {
                         for inst in edit_insts(&shim, from, to, None, Some(&mut clobbers)) {
-                            new_insns.push(inst.construct(shim.func).unwrap());
-                            orig_insn_map.push(InstIx::invalid_value());
+                            if let Some(insn) = inst.construct(shim.func) {
+                                new_insns.push(insn);
+                                orig_insn_map.push(InstIx::invalid_value());
+                            }
                         }
                     }
                     _ => {}
