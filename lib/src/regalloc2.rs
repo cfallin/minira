@@ -12,6 +12,7 @@ use crate::{
     VirtualReg, Writable,
 };
 use smallvec::{smallvec, SmallVec};
+use std::collections::VecDeque;
 
 pub struct Shim<'a, F: Function> {
     // Register environment state. TODO: factor this out and allow
@@ -148,7 +149,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     rru: &'a RealRegUniverse,
     _sri: Option<&StackmapRequestInfo>,
     opts: &Regalloc2Options,
-) -> (Shim<'a, F>, regalloc2::MachineEnv) {
+) -> Result<(Shim<'a, F>, regalloc2::MachineEnv), RegAllocError> {
     let (env, rregs_by_preg_index, pregs_by_rreg_index, extra_scratch_by_class) =
         build_machine_env(rru, opts);
     let vreg_offset = rregs_by_preg_index.len();
@@ -215,6 +216,31 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         }
         let end = shim.preds.len();
         shim.pred_ranges.push((start as u32, end as u32));
+    }
+
+    // Reject CFGs with unreachable blocks; the fuzzer likes to
+    // generate these and we must reject them to keep the checker
+    // happy.
+    let mut reachable = Set::empty();
+    reachable.insert(shim.func.entry_block());
+    let mut queue = VecDeque::new();
+    let mut queue_set = Set::empty();
+    queue.push_back(shim.func.entry_block());
+    queue_set.insert(shim.func.entry_block());
+    while let Some(b) = queue.pop_front() {
+        queue_set.delete(b);
+        for &succ in shim.func.block_succs(b).iter() {
+            if !reachable.contains(succ) && !queue_set.contains(succ) {
+                reachable.insert(succ);
+                queue.push_back(succ);
+                queue_set.insert(succ);
+            }
+        }
+    }
+    for block in shim.func.blocks() {
+        if !reachable.contains(block) {
+            return Err(RegAllocError::Analysis(AnalysisError::UnreachableBlocks));
+        }
     }
 
     // Create a virtual entry instruction with livein defs.
@@ -300,7 +326,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
 
     log::debug!("env = {:?}", env);
 
-    (shim, env)
+    Ok((shim, env))
 }
 
 fn edit_insts<'a, F: Function>(
@@ -871,13 +897,16 @@ pub(crate) fn run<F: Function>(
     run_checker: bool,
     opts: &Regalloc2Options,
 ) -> Result<RegAllocResult<F>, RegAllocError> {
-    let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts);
+    let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts)?;
     let result = regalloc2::run(&ra2_func, &env).map_err(|err| match err {
         regalloc2::RegAllocError::CritEdge(from, to) => {
             RegAllocError::Analysis(AnalysisError::CriticalEdge {
                 from: BlockIx::new(from.index() as u32),
                 to: BlockIx::new(to.index() as u32),
             })
+        }
+        regalloc2::RegAllocError::EntryLivein => {
+            RegAllocError::Analysis(AnalysisError::EntryLiveinValues(vec![]))
         }
         _ => RegAllocError::Other(format!("{:?}", err)),
     })?;
