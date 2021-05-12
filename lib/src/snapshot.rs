@@ -51,8 +51,8 @@ pub struct IRFunction {
 #[derive(Clone)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct IRSnapshot {
-    reg_universe: RealRegUniverse,
-    func: IRFunction,
+    pub reg_universe: RealRegUniverse,
+    pub func: IRFunction,
 }
 
 impl IRSnapshot {
@@ -303,6 +303,9 @@ impl Function for IRFunction {
     }
 
     fn get_spillslot_size(&self, regclass: RegClass, for_vreg: Option<VirtualReg>) -> u32 {
+        if for_vreg.is_none() {
+            return 1;
+        }
         let entry = self.vreg_spill_slot_sizes[for_vreg.unwrap().get_index()]
             .expect("missing spillslot info");
         assert_eq!(entry.1, regclass);

@@ -4,7 +4,9 @@ mod test_cases;
 mod test_framework;
 mod validator;
 
-use regalloc::{allocate_registers_with_opts, Algorithm, BacktrackingOptions, IRSnapshot, Options};
+use regalloc::{
+    allocate_registers_with_opts, Algorithm, BacktrackingOptions, Function, IRSnapshot, Options,
+};
 use test_framework::{make_universe, run_func, RunStage};
 use validator::check_results;
 
@@ -43,7 +45,7 @@ fn main() {
                 .short("a")
                 .takes_value(true)
                 .required(true)
-                .possible_values(&["bt", "lsra", "btc", "lsrac"])
+                .possible_values(&["bt", "lsra", "btc", "lsrac", "ra2", "ra2c"])
                 .help("algorithm name"),
         )
         .arg(
@@ -84,6 +86,10 @@ fn main() {
         "lsra" | "lsrac" => Options {
             run_checker: algorithm == "lsrac",
             algorithm: Algorithm::LinearScan(Default::default()),
+        },
+        "ra2" | "ra2c" => Options {
+            run_checker: algorithm == "ra2c",
+            algorithm: Algorithm::Regalloc2(Default::default()),
         },
         // Unreachable because of defined "possible_values".
         _ => unreachable!(),
@@ -222,7 +228,7 @@ fn run_snapshot(path: &str, opts: Options, quiet: bool) {
                 }
             }
             Ok(())
-        };
+        }
 
         visit_dirs(path, quiet, &mut snapshots, &mut deserialize_one)
             .expect("couldn't read at least one directory entry");
@@ -232,13 +238,30 @@ fn run_snapshot(path: &str, opts: Options, quiet: bool) {
 
     for (i, mut snapshot) in snapshots.into_iter().enumerate() {
         if !quiet {
-            println!("Running regalloc on snapshot {}...", i);
+            println!(
+                "Running regalloc on snapshot {} with {} insts...",
+                i,
+                snapshot.func.insns().len()
+            );
         }
         match snapshot.allocate(opts.clone()) {
             Ok(result) => {
                 if !quiet {
                     println!("allocation of snapshotted IR {} worked!", i);
+                    let nop_moves = result
+                        .insns
+                        .iter()
+                        .filter(|insn| {
+                            if let Some((dst, src)) = snapshot.func.is_move(insn) {
+                                dst.to_reg() == src
+                            } else {
+                                false
+                            }
+                        })
+                        .count();
                     println!("num insts: {}", result.insns.len());
+                    println!("num nop moves: {}", nop_moves);
+                    println!("num non-nop-insts: {}", result.insns.len() - nop_moves);
                     println!("num spill slots: {}", result.num_spill_slots);
                 }
             }
