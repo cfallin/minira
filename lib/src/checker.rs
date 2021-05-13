@@ -282,7 +282,9 @@ impl CheckerState {
             &Inst::Safepoint { inst_ix, ref slots } => {
                 self.check_stackmap(inst_ix, slots)?;
             }
-            _ => {}
+            _ => {
+                debug!("checker: inst {:?}", inst);
+            }
         }
         Ok(())
     }

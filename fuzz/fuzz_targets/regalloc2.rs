@@ -49,23 +49,31 @@ fuzz_target!(|func: ir::Func| {
             let mut stop = false;
             if let regalloc::RegAllocError::RegChecker(_) = &err {
                 stop = true;
-                println!("==== fuzz_regalloc2.rs: checker error: {:?}", err);
+                eprintln!("==== fuzz_regalloc2.rs: checker error: {:?}", err);
             }
             if stop {
                 let mut rendered = String::new();
                 func_backup
                     .render("==== fuzz_regalloc2.rs: failing input:", &mut rendered)
                     .unwrap();
-                println!("{}", rendered);
+                eprintln!("{}", rendered);
 
-                println!("==== fuzz_regalloc2.rs:");
-                println!(
+                eprintln!("==== fuzz_regalloc2.rs:");
+                eprintln!(
                     "==== fuzz_regalloc2.rs: to repro, use flags '-f {} -i {}'",
                     num_regs, num_regs
                 );
-                println!("==== fuzz_regalloc2.rs:");
-                panic!("==== fuzz_regalloc2.rs: STOPPING.  Bye! ====");
+                eprintln!("==== fuzz_regalloc2.rs:");
+
+                log::debug!("FAIL INPUT:");
+                let mut rendered = String::new();
+                func.render("==== fuzz_regalloc2.rs: input:", &mut rendered)
+                    .unwrap();
+                log::debug!("{}", rendered);
+                log::debug!("END FAIL INPUT:");
+
             }
+            assert!(!stop);
         }
     };
 });

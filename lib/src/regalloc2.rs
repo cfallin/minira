@@ -267,6 +267,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             shim.operand_ranges.push((start as u32, start as u32));
             continue;
         }
+
         for &u in &reg_vecs.uses {
             let vreg = shim.translate_reg_to_vreg(u);
             let policy = shim.translate_reg_to_policy(u);
