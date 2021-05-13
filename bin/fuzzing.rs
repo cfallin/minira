@@ -1,7 +1,7 @@
 //! Implements fuzzing primitives for everything.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 
 use crate::test_framework::{self as ir, *};
@@ -22,12 +22,12 @@ struct FuzzingEnv {
     num_virtual_regs: u16,
     num_reftyped_regs: u16, // numbered in vreg space above ordinary vregs.
     /// Map of virtual register index to register class. None means the register hasn't been ever defined.
-    vregs: HashMap<u16, RegClass>,
+    vregs: BTreeMap<u16, RegClass>,
     /// Set of reftyped vregs that have been defined.
-    reftyped_regs: HashSet<u16>,
-    /// Really a hashmap from rc to HashSet<Reg>.
-    regs_by_rc: Vec<HashSet<Reg>>,
-    vregs_by_rc: Vec<HashSet<u16>>,
+    reftyped_regs: BTreeSet<u16>,
+    /// Really a hashmap from rc to BTreeSet<Reg>.
+    regs_by_rc: Vec<BTreeSet<Reg>>,
+    vregs_by_rc: Vec<BTreeSet<u16>>,
 }
 
 impl FuzzingEnv {
@@ -375,10 +375,10 @@ impl Arbitrary for Func {
             num_blocks,
             num_virtual_regs,
             num_reftyped_regs,
-            vregs: HashMap::new(),
-            reftyped_regs: HashSet::new(),
-            regs_by_rc: vec![HashSet::new(); NUM_REG_CLASSES as usize],
-            vregs_by_rc: vec![HashSet::new(); NUM_REG_CLASSES as usize],
+            vregs: BTreeMap::new(),
+            reftyped_regs: BTreeSet::new(),
+            regs_by_rc: vec![BTreeSet::new(); NUM_REG_CLASSES as usize],
+            vregs_by_rc: vec![BTreeSet::new(); NUM_REG_CLASSES as usize],
         };
 
         let entry = Some(Label::Resolved {
