@@ -268,6 +268,29 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             continue;
         }
 
+        // Reject programs that use a scratch or extra-scratch
+        // register. The former is a requirement at the regalloc.rs API
+        // level; the latter is something that we impose because we need
+        // another scratch register for stack-to-stack moves.
+        let disallowed: SmallVec<[RealReg; 4]> = smallvec![
+            shim.rregs_by_preg_index[env.scratch_by_class[0].index()],
+            shim.rregs_by_preg_index[env.scratch_by_class[1].index()],
+            shim.rregs_by_preg_index[shim.extra_scratch_by_class[0].index()],
+            shim.rregs_by_preg_index[shim.extra_scratch_by_class[1].index()]
+        ];
+        for &r in reg_vecs
+            .uses
+            .iter()
+            .chain(reg_vecs.defs.iter())
+            .chain(reg_vecs.mods.iter())
+        {
+            if let Some(reg) = r.as_real_reg() {
+                if disallowed.contains(&reg) {
+                    return Err(RegAllocError::Analysis(AnalysisError::IllegalRealReg(reg)));
+                }
+            }
+        }
+
         for &u in &reg_vecs.uses {
             let vreg = shim.translate_reg_to_vreg(u);
             let policy = shim.translate_reg_to_policy(u);
