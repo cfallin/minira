@@ -71,7 +71,6 @@ fuzz_target!(|func: ir::Func| {
                     .unwrap();
                 log::debug!("{}", rendered);
                 log::debug!("END FAIL INPUT:");
-
             }
             assert!(!stop);
         }

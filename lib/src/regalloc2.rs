@@ -799,10 +799,11 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     fn branch_blockparam_arg_offset(
         &self,
         _block: regalloc2::Block,
-        _insn: regalloc2::Inst,
+        insn: regalloc2::Inst,
     ) -> usize {
-        // We don't use blockparams.
-        0
+        // We don't use blockparams, so blockparams start at the very
+        // end of the operands.
+        self.inst_operands(insn).len()
     }
 
     fn is_safepoint(&self, insn: regalloc2::Inst) -> bool {
