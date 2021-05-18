@@ -34,6 +34,7 @@ fuzz_target!(|func: ir::Func| {
         algorithm: regalloc::Algorithm::Regalloc2(regalloc::Regalloc2Options {
             num_int_preferred: 4,
             num_float_preferred: 4,
+            ignore_scratch_reg_mentions: false,
         }),
     };
 

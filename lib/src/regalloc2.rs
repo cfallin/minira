@@ -250,6 +250,14 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     }
     shim.operand_ranges.push((0, shim.operands.len() as u32));
 
+    let disallowed: SmallVec<[RealReg; 4]> = smallvec![
+        shim.rregs_by_preg_index[env.scratch_by_class[0].index()],
+        shim.rregs_by_preg_index[env.scratch_by_class[1].index()],
+        shim.rregs_by_preg_index[shim.extra_scratch_by_class[0].index()],
+        shim.rregs_by_preg_index[shim.extra_scratch_by_class[1].index()]
+    ];
+    log::debug!("disallowed: {:?}", disallowed);
+
     // Create Operands for each reg use/def/mod in the function.
     let mut reg_vecs = RegVecs::new(false);
     let mut moves = 0;
@@ -266,25 +274,26 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             continue;
         }
 
-        // Reject programs that use a scratch or extra-scratch
-        // register. The former is a requirement at the regalloc.rs API
-        // level; the latter is something that we impose because we need
-        // another scratch register for stack-to-stack moves.
-        let disallowed: SmallVec<[RealReg; 4]> = smallvec![
-            shim.rregs_by_preg_index[env.scratch_by_class[0].index()],
-            shim.rregs_by_preg_index[env.scratch_by_class[1].index()],
-            shim.rregs_by_preg_index[shim.extra_scratch_by_class[0].index()],
-            shim.rregs_by_preg_index[shim.extra_scratch_by_class[1].index()]
-        ];
-        for &r in reg_vecs
-            .uses
-            .iter()
-            .chain(reg_vecs.defs.iter())
-            .chain(reg_vecs.mods.iter())
-        {
-            if let Some(reg) = r.as_real_reg() {
-                if disallowed.contains(&reg) {
-                    return Err(RegAllocError::Analysis(AnalysisError::IllegalRealReg(reg)));
+        if !opts.ignore_scratch_reg_mentions {
+            // Reject programs that use a scratch or extra-scratch
+            // register. The former is a requirement at the regalloc.rs API
+            // level; the latter is something that we impose because we need
+            // another scratch register for stack-to-stack moves.
+            for &r in reg_vecs
+                .uses
+                .iter()
+                .chain(reg_vecs.defs.iter())
+                .chain(reg_vecs.mods.iter())
+            {
+                if let Some(reg) = r.as_real_reg() {
+                    if disallowed.contains(&reg) {
+                        log::debug!(
+                            "illegal use of disallowed register {:?} in inst {:?}",
+                            reg,
+                            i
+                        );
+                        return Err(RegAllocError::Analysis(AnalysisError::IllegalRealReg(reg)));
+                    }
                 }
             }
         }
@@ -900,8 +909,16 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
 
 #[derive(Clone, Debug)]
 pub struct Regalloc2Options {
+    /// The first `num_int_preferred` int-class regs are preferred
+    /// (e.g., perhaps caller-saved so cheaper to use).
     pub num_int_preferred: usize,
+    /// The first `num_float_preferred` float-class regs are preferred
+    /// (e.g., perhaps caller-saved so cheaper to use).
     pub num_float_preferred: usize,
+    /// Ignore uses of scratch registers rather than flagging an
+    /// error; the client "knows what it's doing" (e.g. only mentions
+    /// them as clobbers).
+    pub ignore_scratch_reg_mentions: bool,
 }
 
 impl std::default::Default for Regalloc2Options {
@@ -909,6 +926,7 @@ impl std::default::Default for Regalloc2Options {
         Self {
             num_int_preferred: 8,
             num_float_preferred: 8,
+            ignore_scratch_reg_mentions: true,
         }
     }
 }
