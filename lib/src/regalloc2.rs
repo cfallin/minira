@@ -286,9 +286,6 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
                 .chain(reg_vecs.mods.iter())
             {
                 if let Some(reg) = r.as_real_reg() {
-                    if reg.get_index() >= shim.rru.allocable {
-                        continue;
-                    }
                     if disallowed.contains(&reg) {
                         log::debug!(
                             "illegal use of disallowed register {:?} in inst {:?}",
@@ -302,6 +299,11 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         }
 
         for &u in &reg_vecs.uses {
+            if let Some(reg) = u.as_real_reg() {
+                if reg.get_index() >= shim.rru.allocable {
+                    continue;
+                }
+            }
             let vreg = shim.translate_reg_to_vreg(u);
             let policy = shim.translate_reg_to_policy(u);
             shim.operands.push(regalloc2::Operand::new(
@@ -312,6 +314,11 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             ));
         }
         for &d in &reg_vecs.defs {
+            if let Some(reg) = d.as_real_reg() {
+                if reg.get_index() >= shim.rru.allocable {
+                    continue;
+                }
+            }
             let vreg = shim.translate_reg_to_vreg(d);
             let policy = shim.translate_reg_to_policy(d);
             shim.operands.push(regalloc2::Operand::new(
@@ -322,6 +329,11 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             ));
         }
         for &m in &reg_vecs.mods {
+            if let Some(reg) = m.as_real_reg() {
+                if reg.get_index() >= shim.rru.allocable {
+                    continue;
+                }
+            }
             let vreg = shim.translate_reg_to_vreg(m);
             let policy = shim.translate_reg_to_policy(m);
             shim.operands.push(regalloc2::Operand::new(
