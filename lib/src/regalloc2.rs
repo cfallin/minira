@@ -48,6 +48,7 @@ fn build_machine_env(
     let mut preferred_regs_by_class = vec![vec![], vec![]];
     let mut non_preferred_regs_by_class = vec![vec![], vec![]];
     let mut scratch_by_class = vec![regalloc2::PReg::invalid(), regalloc2::PReg::invalid()];
+    let mut extra_scratch_by_class = vec![regalloc2::PReg::invalid(), regalloc2::PReg::invalid()];
 
     // For each reg in the RRU, create a PReg. Its hw_enc index is its
     // index in the class; note that we must have <= 32 regs per class
@@ -101,6 +102,10 @@ fn build_machine_env(
             scratch_by_class[0] = preg;
         } else if rreg.get_index() == float_info.suggested_scratch.unwrap() {
             scratch_by_class[1] = preg;
+        } else if rreg.get_index() == int_info.suggested_scratch2.unwrap() {
+            extra_scratch_by_class[0] = preg;
+        } else if rreg.get_index() == float_info.suggested_scratch2.unwrap() {
+            extra_scratch_by_class[1] = preg;
         } else if rreg.get_index() < rru.allocable {
             match preg.class() {
                 regalloc2::RegClass::Int => {
@@ -122,13 +127,6 @@ fn build_machine_env(
     }
 
     regs.sort_by_key(|preg| preg.index());
-
-    // Grab an extra scratch reg for each class; we need this in the
-    // (rare but possible) case that we need to do a stack-to-stack
-    // move.
-    let mut extra_scratch_by_class = vec![];
-    extra_scratch_by_class.push(non_preferred_regs_by_class[0].pop().unwrap());
-    extra_scratch_by_class.push(non_preferred_regs_by_class[1].pop().unwrap());
 
     let env = regalloc2::MachineEnv {
         regs,

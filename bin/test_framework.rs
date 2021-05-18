@@ -2436,11 +2436,13 @@ pub fn make_universe(num_i32: usize, num_f32: usize) -> RealRegUniverse {
             regs.push((reg, name));
             index += 1;
         }
+        let second_last = index as usize - 2;
         let last = index as usize - 1;
         allocable_by_class[RegClass::I64.rc_to_usize()] = Some(RegClassInfo {
             first,
             last,
             suggested_scratch: Some(last),
+            suggested_scratch2: Some(second_last),
         });
     }
 
@@ -2452,11 +2454,13 @@ pub fn make_universe(num_i32: usize, num_f32: usize) -> RealRegUniverse {
             regs.push((reg, name));
             index += 1;
         }
+        let second_last = index as usize - 2;
         let last = index as usize - 1;
         allocable_by_class[RegClass::V128.rc_to_usize()] = Some(RegClassInfo {
             first,
             last,
             suggested_scratch: Some(last),
+            suggested_scratch2: Some(second_last),
         });
     }
 
