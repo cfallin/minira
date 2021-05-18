@@ -241,12 +241,19 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         }
     }
 
-    // Create a virtual entry instruction with livein defs.
-    for &livein in shim.func.func_liveins().iter() {
-        shim.operands.push(regalloc2::Operand::reg_fixed_def(
-            shim.translate_realreg_to_vreg(livein),
-            shim.pregs_by_rreg_index[livein.get_index()],
-        ));
+    // Create a virtual entry instruction with livein defs. N.B.: we
+    // actually define *every* preg here, because regalloc2 does not
+    // distinguish between alloc'able and non-alloc'able regs in the
+    // same way that regalloc.rs does (it simply won't probe them, but
+    // it still tracks their live-ranges).
+    for &livein in &shim.pregs_by_rreg_index {
+        if livein != regalloc2::PReg::invalid() {
+            let rreg = shim.rregs_by_preg_index[livein.index()];
+            shim.operands.push(regalloc2::Operand::reg_fixed_def(
+                shim.translate_realreg_to_vreg(rreg),
+                livein,
+            ));
+        }
     }
     shim.operand_ranges.push((0, shim.operands.len() as u32));
 
