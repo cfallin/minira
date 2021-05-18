@@ -582,6 +582,12 @@ impl Checker {
             }
 
             for succ in self.bb_succs.get(&block).unwrap() {
+                // Entry block's input state doesn't change: it has
+                // implicit defs of all real regs as liveins.
+                if *succ == self.bb_entry {
+                    continue;
+                }
+
                 let cur_succ_in = self.bb_in.get(succ).unwrap();
                 let mut new_state = state.clone();
                 new_state.meet_with(cur_succ_in);

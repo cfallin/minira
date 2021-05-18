@@ -241,19 +241,12 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         }
     }
 
-    // Create a virtual entry instruction with livein defs. N.B.: we
-    // actually define *every* preg here, because regalloc2 does not
-    // distinguish between alloc'able and non-alloc'able regs in the
-    // same way that regalloc.rs does (it simply won't probe them, but
-    // it still tracks their live-ranges).
-    for &livein in &shim.pregs_by_rreg_index {
-        if livein != regalloc2::PReg::invalid() {
-            let rreg = shim.rregs_by_preg_index[livein.index()];
-            shim.operands.push(regalloc2::Operand::reg_fixed_def(
-                shim.translate_realreg_to_vreg(rreg),
-                livein,
-            ));
-        }
+    // Create a virtual entry instruction with livein defs.
+    for &livein in shim.func.func_liveins().iter() {
+        let vreg = shim.translate_realreg_to_vreg(livein);
+        let preg = shim.translate_realreg_to_preg(livein);
+        shim.operands
+            .push(regalloc2::Operand::reg_fixed_def(vreg, preg));
     }
     shim.operand_ranges.push((0, shim.operands.len() as u32));
 
@@ -293,6 +286,9 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
                 .chain(reg_vecs.mods.iter())
             {
                 if let Some(reg) = r.as_real_reg() {
+                    if reg.get_index() >= shim.rru.allocable {
+                        continue;
+                    }
                     if disallowed.contains(&reg) {
                         log::debug!(
                             "illegal use of disallowed register {:?} in inst {:?}",
