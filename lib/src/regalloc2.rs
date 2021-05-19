@@ -481,16 +481,18 @@ fn edit_insts<'a, F: Function>(
         if let Some(clobbers) = clobbers {
             clobbers.insert(scratch);
         }
-        ret.push(InstToInsert::Reload {
-            to_reg: Writable::from_reg(scratch),
-            from_slot: from,
-            for_vreg: None,
-        });
-        ret.push(InstToInsert::Spill {
-            to_slot: to,
-            from_reg: scratch,
-            for_vreg: None,
-        });
+        if from != to {
+            ret.push(InstToInsert::Reload {
+                to_reg: Writable::from_reg(scratch),
+                from_slot: from,
+                for_vreg: None,
+            });
+            ret.push(InstToInsert::Spill {
+                to_slot: to,
+                from_reg: scratch,
+                for_vreg: None,
+            });
+        }
         if let Some(to_vreg) = to_vreg {
             let for_reg = shim.translate_vreg_to_reg(to_vreg);
             ret.push(InstToInsert::DefSlot {
