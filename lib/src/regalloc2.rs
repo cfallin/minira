@@ -20,6 +20,7 @@ pub struct Shim<'a, F: Function> {
     rru: &'a RealRegUniverse,
     rregs_by_preg_index: Vec<RealReg>,
     pregs_by_rreg_index: Vec<regalloc2::PReg>,
+    pinned_vregs: Vec<regalloc2::VReg>,
     extra_scratch_by_class: Vec<regalloc2::PReg>,
     vreg_offset: usize,
 
@@ -42,6 +43,7 @@ fn build_machine_env(
     regalloc2::MachineEnv,
     Vec<RealReg>,
     Vec<regalloc2::PReg>,
+    Vec<regalloc2::VReg>,
     Vec<regalloc2::PReg>,
 ) {
     let mut regs = vec![];
@@ -65,6 +67,7 @@ fn build_machine_env(
     // directions.
     let mut rregs_by_preg_idx = vec![RealReg::invalid(); 64];
     let mut pregs_by_rreg_idx = vec![regalloc2::PReg::invalid(); 64];
+    let mut pinned_vregs = vec![];
 
     let int_info = rru.allocable_by_class[RegClass::rc_to_usize(RegClass::I64)]
         .as_ref()
@@ -94,6 +97,8 @@ fn build_machine_env(
 
         // We'll sort these by index below.
         regs.push(preg);
+
+        pinned_vregs.push(regalloc2::VReg::new(preg.hw_enc() as usize, preg.class()));
 
         rregs_by_preg_idx[preg.index()] = *rreg;
         pregs_by_rreg_idx[rreg.get_index()] = preg;
@@ -138,6 +143,7 @@ fn build_machine_env(
         env,
         rregs_by_preg_idx,
         pregs_by_rreg_idx,
+        pinned_vregs,
         extra_scratch_by_class,
     )
 }
@@ -148,13 +154,14 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     _sri: Option<&StackmapRequestInfo>,
     opts: &Regalloc2Options,
 ) -> Result<(Shim<'a, F>, regalloc2::MachineEnv), RegAllocError> {
-    let (env, rregs_by_preg_index, pregs_by_rreg_index, extra_scratch_by_class) =
+    let (env, rregs_by_preg_index, pregs_by_rreg_index, pinned_vregs, extra_scratch_by_class) =
         build_machine_env(rru, opts);
     let vreg_offset = rregs_by_preg_index.len();
     let mut shim = Shim {
         rru,
         rregs_by_preg_index,
         pregs_by_rreg_index,
+        pinned_vregs,
         vreg_offset,
         extra_scratch_by_class,
 
@@ -907,6 +914,18 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
 
     fn reftype_vregs(&self) -> &[regalloc2::VReg] {
         &self.reftype_vregs[..]
+    }
+
+    fn is_pinned_vreg(&self, vreg: regalloc2::VReg) -> Option<regalloc2::PReg> {
+        if vreg.vreg() < self.vreg_offset {
+            Some(regalloc2::PReg::new(vreg.vreg(), vreg.class()))
+        } else {
+            None
+        }
+    }
+
+    fn pinned_vregs(&self) -> &[regalloc2::VReg] {
+        &self.pinned_vregs[..]
     }
 
     fn spillslot_size(&self, regclass: regalloc2::RegClass, _for_vreg: regalloc2::VReg) -> usize {
