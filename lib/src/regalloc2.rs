@@ -94,6 +94,7 @@ fn build_machine_env(
             }
             _ => unreachable!(),
         };
+        log::debug!("RealReg {:?} <-> PReg {:?}", rreg, preg);
 
         // We'll sort these by index below.
         regs.push(preg);
@@ -130,6 +131,19 @@ fn build_machine_env(
             }
         }
     }
+
+    log::debug!("preferred_regs int: {:?}", preferred_regs_by_class[0]);
+    log::debug!("preferred_regs float: {:?}", preferred_regs_by_class[1]);
+    log::debug!(
+        "non_preferred_regs int: {:?}",
+        non_preferred_regs_by_class[0]
+    );
+    log::debug!(
+        "non_preferred_regs float: {:?}",
+        non_preferred_regs_by_class[1]
+    );
+    log::debug!("scratch1: {:?}", scratch_by_class);
+    log::debug!("scratch2: {:?}", extra_scratch_by_class);
 
     regs.sort_by_key(|preg| preg.index());
 
@@ -273,7 +287,20 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         let mut coll = RegUsageCollector::new(&mut reg_vecs);
         F::get_regs(insn, &mut coll);
         let start = shim.operands.len();
-        if shim.func.is_move(insn).is_some() {
+        if let Some((dst, src)) = shim.func.is_move(insn) {
+            for r in &[dst.to_reg(), src] {
+                if let Some(rreg) = r.as_real_reg() {
+                    if disallowed.contains(&rreg) {
+                        log::debug!(
+                            "illegal use of disallowed register {:?} in inst {:?}",
+                            rreg,
+                            insn
+                        );
+                        return Err(RegAllocError::Analysis(AnalysisError::IllegalRealReg(rreg)));
+                    }
+                }
+            }
+
             moves += 1;
             // Moves are handled specially by the regalloc. We don't
             // need to generate any operands at all.
@@ -973,7 +1000,13 @@ pub(crate) fn run<F: Function>(
     opts: &Regalloc2Options,
 ) -> Result<RegAllocResult<F>, RegAllocError> {
     let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts)?;
-    let result = regalloc2::run(&ra2_func, &env).map_err(|err| match err {
+    let ra2_opts = regalloc2::RegallocOptions {
+        // Only bother to collect info for verbose log messages if
+        // we're running the checker (hence in a fuzzer or likely to
+        // want to debug errors).
+        verbose_log: run_checker,
+    };
+    let result = regalloc2::run(&ra2_func, &env, &ra2_opts).map_err(|err| match err {
         regalloc2::RegAllocError::CritEdge(from, to) => {
             RegAllocError::Analysis(AnalysisError::CriticalEdge {
                 from: BlockIx::new(from.index() as u32),
