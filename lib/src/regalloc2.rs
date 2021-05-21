@@ -619,6 +619,21 @@ fn compute_insts_to_add<'a, F: Function>(
                     ret.push(inst_iep);
                 }
             }
+            &regalloc2::Edit::DefAlloc { alloc, vreg } => {
+                if let Some(preg) = alloc.as_reg() {
+                    let to_reg = Writable::from_reg(shim.rregs_by_preg_index[preg.index()]);
+                    let for_reg = shim.translate_vreg_to_reg(vreg);
+                    let edit = InstToInsert::DefReg { to_reg, for_reg };
+                    let inst_iep = InstToInsertAndExtPoint::new(edit, pos.clone());
+                    ret.push(inst_iep);
+                } else if let Some(slot) = alloc.as_stack() {
+                    let to_slot = SpillSlot::new(slot.index() as u32);
+                    let for_reg = shim.translate_vreg_to_reg(vreg);
+                    let edit = InstToInsert::DefSlot { to_slot, for_reg };
+                    let inst_iep = InstToInsertAndExtPoint::new(edit, pos.clone());
+                    ret.push(inst_iep);
+                }
+            }
             _ => {}
         }
     }
