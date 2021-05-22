@@ -347,11 +347,21 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
                 regalloc2::OperandPos::Before,
             ));
         }
+        let mut def_rregs: u64 = 0;
         for &d in &reg_vecs.defs {
             if let Some(reg) = d.as_real_reg() {
                 if reg.get_index() >= shim.rru.allocable {
                     continue;
                 }
+                // Tolerate multiple defs of the same RReg. We see
+                // this e.g. on call instructions from Cranelift (a
+                // clobber and a retval).
+                let idx = shim.pregs_by_rreg_index[reg.get_index()].index();
+                assert!(idx < 64);
+                if def_rregs & (1 << idx) != 0 {
+                    continue;
+                }
+                def_rregs |= 1 << idx;
             }
             let vreg = shim.translate_reg_to_vreg(d);
             let policy = shim.translate_reg_to_policy(d);
