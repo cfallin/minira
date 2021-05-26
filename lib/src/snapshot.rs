@@ -178,9 +178,10 @@ impl IRSnapshot {
     }
 
     pub fn allocate(&mut self, opts: Options) -> Result<RegAllocResult<IRFunction>, RegAllocError> {
+        let env = RegEnv::from_rru_and_opts(self.reg_universe.clone(), &opts);
         allocate_registers_with_opts(
             &mut self.func,
-            &self.reg_universe,
+            &env,
             None, /*no stackmap request*/
             opts,
         )

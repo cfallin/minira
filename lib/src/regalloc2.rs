@@ -8,21 +8,25 @@ use crate::data_structures::RegVecs;
 use crate::inst_stream::{ExtPoint, InstExtPoint, InstToInsert, InstToInsertAndExtPoint};
 use crate::{
     BlockIx, Function, InstIx, RealReg, RealRegUniverse, Reg, RegAllocError, RegAllocResult,
-    RegClass, RegUsageCollector, RegUsageMapper, Set, SpillSlot, StackmapRequestInfo, TypedIxVec,
-    VirtualReg, Writable,
+    RegClass, RegEnv, RegUsageCollector, RegUsageMapper, Set, SpillSlot, StackmapRequestInfo,
+    TypedIxVec, VirtualReg, Writable,
 };
 use smallvec::{smallvec, SmallVec};
 use std::collections::VecDeque;
 
-pub struct Shim<'a, F: Function> {
-    // Register environment state. TODO: factor this out and allow
-    // client to compute the converted env only once.
-    rru: &'a RealRegUniverse,
+#[derive(Clone, Debug)]
+pub(crate) struct Regalloc2Env {
+    env: regalloc2::MachineEnv,
     rregs_by_preg_index: Vec<RealReg>,
     pregs_by_rreg_index: Vec<regalloc2::PReg>,
     pinned_vregs: Vec<regalloc2::VReg>,
     extra_scratch_by_class: Vec<regalloc2::PReg>,
     vreg_offset: usize,
+}
+
+pub(crate) struct Shim<'a, F: Function> {
+    // Register environment state.
+    env: &'a RegEnv,
 
     // Function-specific state.
     func: &'a mut F,
@@ -36,16 +40,7 @@ pub struct Shim<'a, F: Function> {
     safepoints: regalloc2::bitvec::BitVec,
 }
 
-fn build_machine_env(
-    rru: &RealRegUniverse,
-    opts: &Regalloc2Options,
-) -> (
-    regalloc2::MachineEnv,
-    Vec<RealReg>,
-    Vec<regalloc2::PReg>,
-    Vec<regalloc2::VReg>,
-    Vec<regalloc2::PReg>,
-) {
+pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) -> Regalloc2Env {
     let mut regs = vec![];
     let mut preferred_regs_by_class = vec![vec![], vec![]];
     let mut non_preferred_regs_by_class = vec![vec![], vec![]];
@@ -65,8 +60,8 @@ fn build_machine_env(
     // PReg is limited to 64 (32 int, 32 float) regs due to
     // bitpacking, so just build full lookup tables in both
     // directions.
-    let mut rregs_by_preg_idx = vec![RealReg::invalid(); 64];
-    let mut pregs_by_rreg_idx = vec![regalloc2::PReg::invalid(); 64];
+    let mut rregs_by_preg_index = vec![RealReg::invalid(); 64];
+    let mut pregs_by_rreg_index = vec![regalloc2::PReg::invalid(); 64];
     let mut pinned_vregs = vec![];
 
     let int_info = rru.allocable_by_class[RegClass::rc_to_usize(RegClass::I64)]
@@ -101,8 +96,8 @@ fn build_machine_env(
 
         pinned_vregs.push(regalloc2::VReg::new(preg.hw_enc() as usize, preg.class()));
 
-        rregs_by_preg_idx[preg.index()] = *rreg;
-        pregs_by_rreg_idx[rreg.get_index()] = preg;
+        rregs_by_preg_index[preg.index()] = *rreg;
+        pregs_by_rreg_index[rreg.get_index()] = preg;
 
         if rreg.get_index() == int_info.suggested_scratch.unwrap() {
             scratch_by_class[0] = preg;
@@ -147,38 +142,32 @@ fn build_machine_env(
 
     regs.sort_by_key(|preg| preg.index());
 
-    let env = regalloc2::MachineEnv {
+    let machenv = regalloc2::MachineEnv {
         regs,
         preferred_regs_by_class,
         non_preferred_regs_by_class,
         scratch_by_class,
     };
-    (
-        env,
-        rregs_by_preg_idx,
-        pregs_by_rreg_idx,
-        pinned_vregs,
-        extra_scratch_by_class,
-    )
-}
-
-pub(crate) fn create_shim_and_env<'a, F: Function>(
-    func: &'a mut F,
-    rru: &'a RealRegUniverse,
-    _sri: Option<&StackmapRequestInfo>,
-    opts: &Regalloc2Options,
-) -> Result<(Shim<'a, F>, regalloc2::MachineEnv), RegAllocError> {
-    let (env, rregs_by_preg_index, pregs_by_rreg_index, pinned_vregs, extra_scratch_by_class) =
-        build_machine_env(rru, opts);
     let vreg_offset = rregs_by_preg_index.len();
-    let mut shim = Shim {
-        rru,
+
+    Regalloc2Env {
+        env: machenv,
         rregs_by_preg_index,
         pregs_by_rreg_index,
         pinned_vregs,
-        vreg_offset,
         extra_scratch_by_class,
+        vreg_offset,
+    }
+}
 
+pub(crate) fn create_shim<'a, F: Function>(
+    func: &'a mut F,
+    env: &'a RegEnv,
+    _sri: Option<&StackmapRequestInfo>,
+    opts: &Regalloc2Options,
+) -> Result<Shim<'a, F>, RegAllocError> {
+    let mut shim = Shim {
+        env,
         func,
         succs: vec![],
         succ_ranges: vec![],
@@ -272,10 +261,10 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     shim.operand_ranges.push((0, shim.operands.len() as u32));
 
     let disallowed: SmallVec<[RealReg; 4]> = smallvec![
-        shim.rregs_by_preg_index[env.scratch_by_class[0].index()],
-        shim.rregs_by_preg_index[env.scratch_by_class[1].index()],
-        shim.rregs_by_preg_index[shim.extra_scratch_by_class[0].index()],
-        shim.rregs_by_preg_index[shim.extra_scratch_by_class[1].index()]
+        shim.ra2_env().rregs_by_preg_index[shim.ra2_env().env.scratch_by_class[0].index()],
+        shim.ra2_env().rregs_by_preg_index[shim.ra2_env().env.scratch_by_class[1].index()],
+        shim.ra2_env().rregs_by_preg_index[shim.ra2_env().extra_scratch_by_class[0].index()],
+        shim.ra2_env().rregs_by_preg_index[shim.ra2_env().extra_scratch_by_class[1].index()]
     ];
     log::debug!("disallowed: {:?}", disallowed);
 
@@ -334,7 +323,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
 
         for &u in &reg_vecs.uses {
             if let Some(reg) = u.as_real_reg() {
-                if reg.get_index() >= shim.rru.allocable {
+                if reg.get_index() >= shim.env.rru.allocable {
                     continue;
                 }
             }
@@ -350,13 +339,13 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         let mut def_rregs: u64 = 0;
         for &d in &reg_vecs.defs {
             if let Some(reg) = d.as_real_reg() {
-                if reg.get_index() >= shim.rru.allocable {
+                if reg.get_index() >= shim.env.rru.allocable {
                     continue;
                 }
                 // Tolerate multiple defs of the same RReg. We see
                 // this e.g. on call instructions from Cranelift (a
                 // clobber and a retval).
-                let idx = shim.pregs_by_rreg_index[reg.get_index()].index();
+                let idx = shim.ra2_env().pregs_by_rreg_index[reg.get_index()].index();
                 assert!(idx < 64);
                 if def_rregs & (1 << idx) != 0 {
                     continue;
@@ -374,7 +363,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
         }
         for &m in &reg_vecs.mods {
             if let Some(reg) = m.as_real_reg() {
-                if reg.get_index() >= shim.rru.allocable {
+                if reg.get_index() >= shim.env.rru.allocable {
                     continue;
                 }
             }
@@ -392,7 +381,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
             for &liveout in shim.func.func_liveouts().iter() {
                 shim.operands.push(regalloc2::Operand::reg_fixed_use(
                     shim.translate_realreg_to_vreg(liveout),
-                    shim.pregs_by_rreg_index[liveout.get_index()],
+                    shim.ra2_env().pregs_by_rreg_index[liveout.get_index()],
                 ));
             }
         }
@@ -414,9 +403,7 @@ pub(crate) fn create_shim_and_env<'a, F: Function>(
     // Compute safepoint map.
     // TODO
 
-    log::debug!("env = {:?}", env);
-
-    Ok((shim, env))
+    Ok(shim)
 }
 
 fn edit_insts<'a, F: Function>(
@@ -429,8 +416,8 @@ fn edit_insts<'a, F: Function>(
     let mut ret = smallvec![];
     if from.is_reg() && to.is_reg() {
         assert_eq!(to.as_reg().unwrap().class(), from.as_reg().unwrap().class());
-        let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
-        let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
+        let to = shim.ra2_env().rregs_by_preg_index[to.as_reg().unwrap().index()];
+        let from = shim.ra2_env().rregs_by_preg_index[from.as_reg().unwrap().index()];
         if to != from {
             if let Some(clobbers) = clobbers {
                 clobbers.insert(to);
@@ -450,7 +437,7 @@ fn edit_insts<'a, F: Function>(
             });
         }
     } else if from.is_reg() && to.is_stack() {
-        let from = shim.rregs_by_preg_index[from.as_reg().unwrap().index()];
+        let from = shim.ra2_env().rregs_by_preg_index[from.as_reg().unwrap().index()];
         let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
         ret.push(InstToInsert::Spill {
             to_slot: to,
@@ -465,7 +452,7 @@ fn edit_insts<'a, F: Function>(
             });
         }
     } else if from.is_stack() && to.is_reg() {
-        let to = shim.rregs_by_preg_index[to.as_reg().unwrap().index()];
+        let to = shim.ra2_env().rregs_by_preg_index[to.as_reg().unwrap().index()];
         let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
         if let Some(clobbers) = clobbers {
             clobbers.insert(to);
@@ -486,8 +473,8 @@ fn edit_insts<'a, F: Function>(
         let rc = from.class();
         let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
         let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
-        let scratch =
-            shim.rregs_by_preg_index[shim.extra_scratch_by_class[rc as u8 as usize].index()];
+        let scratch = shim.ra2_env().rregs_by_preg_index
+            [shim.ra2_env().extra_scratch_by_class[rc as u8 as usize].index()];
         if let Some(clobbers) = clobbers {
             clobbers.insert(scratch);
         }
@@ -533,7 +520,8 @@ impl<'a, 'b, F: Function> Mapper<'a, 'b, F> {
             if op.vreg() == vreg && (op.pos() == pos || op.kind() == regalloc2::OperandKind::Mod) {
                 if self.allocs[i].is_reg() {
                     return Some(
-                        self.shim.rregs_by_preg_index[self.allocs[i].as_reg().unwrap().index()],
+                        self.shim.ra2_env().rregs_by_preg_index
+                            [self.allocs[i].as_reg().unwrap().index()],
                     );
                 } else {
                     return None;
@@ -578,7 +566,7 @@ fn edit_insn_registers<'a, F: Function>(
     log::debug!("iix {:?}: mapper {:?}", iix, mapper);
 
     if let Some(checker) = checker.as_mut() {
-        checker.handle_insn::<F, _>(shim.rru, bix, iix, insn, &mapper)?;
+        checker.handle_insn::<F, _>(&shim.env.rru, bix, iix, insn, &mapper)?;
     }
 
     F::map_regs(insn, &mapper);
@@ -586,7 +574,7 @@ fn edit_insn_registers<'a, F: Function>(
     if shim.func.is_included_in_clobbers(insn) {
         for (op, alloc) in operands.iter().zip(allocs.iter()) {
             if op.kind() != regalloc2::OperandKind::Use && alloc.is_reg() {
-                let rreg = shim.rregs_by_preg_index[alloc.as_reg().unwrap().index()];
+                let rreg = shim.ra2_env().rregs_by_preg_index[alloc.as_reg().unwrap().index()];
                 assert!(rreg.is_valid());
                 clobbers.insert(rreg);
             }
@@ -609,7 +597,7 @@ fn handle_nop<'a, F: Function>(
             allocs: &[],
         };
         let nop = shim.func.gen_zero_len_nop();
-        checker.handle_insn::<F, _>(shim.rru, bix, iix, &nop, &mapper)?;
+        checker.handle_insn::<F, _>(&shim.env.rru, bix, iix, &nop, &mapper)?;
     }
     Ok(())
 }
@@ -631,7 +619,8 @@ fn compute_insts_to_add<'a, F: Function>(
             }
             &regalloc2::Edit::DefAlloc { alloc, vreg } => {
                 if let Some(preg) = alloc.as_reg() {
-                    let to_reg = Writable::from_reg(shim.rregs_by_preg_index[preg.index()]);
+                    let to_reg =
+                        Writable::from_reg(shim.ra2_env().rregs_by_preg_index[preg.index()]);
                     let for_reg = shim.translate_vreg_to_reg(vreg);
                     let edit = InstToInsert::DefReg { to_reg, for_reg };
                     let inst_iep = InstToInsertAndExtPoint::new(edit, pos.clone());
@@ -658,7 +647,7 @@ pub(crate) fn finalize<'a, F: Function>(
     let mut checker = if run_checker {
         Some(CheckerContext::new(
             shim.func,
-            shim.rru,
+            &shim.env.rru,
             &compute_insts_to_add(&shim, &out),
             /* TODO stackmap_info */ None,
         ))
@@ -778,8 +767,12 @@ fn translate_to_rc(rc: regalloc2::RegClass) -> RegClass {
 }
 
 impl<'a, F: Function> Shim<'a, F> {
+    fn ra2_env(&self) -> &Regalloc2Env {
+        self.env.regalloc2.as_ref().unwrap()
+    }
+
     fn translate_realreg_to_preg(&self, reg: RealReg) -> regalloc2::PReg {
-        self.pregs_by_rreg_index[reg.get_index()]
+        self.ra2_env().pregs_by_rreg_index[reg.get_index()]
     }
 
     fn translate_realreg_to_vreg(&self, reg: RealReg) -> regalloc2::VReg {
@@ -790,7 +783,7 @@ impl<'a, F: Function> Shim<'a, F> {
     fn translate_virtualreg_to_vreg(&self, reg: VirtualReg) -> regalloc2::VReg {
         let rc = reg.get_class();
         let trc = translate_rc(rc);
-        regalloc2::VReg::new(reg.get_index() + self.vreg_offset, trc)
+        regalloc2::VReg::new(reg.get_index() + self.ra2_env().vreg_offset, trc)
     }
 
     fn translate_reg_to_vreg(&self, reg: Reg) -> regalloc2::VReg {
@@ -802,12 +795,12 @@ impl<'a, F: Function> Shim<'a, F> {
     }
 
     fn translate_vreg_to_reg(&self, vreg: regalloc2::VReg) -> Reg {
-        if vreg.vreg() >= self.vreg_offset {
-            let idx = vreg.vreg() - self.vreg_offset;
+        if vreg.vreg() >= self.ra2_env().vreg_offset {
+            let idx = vreg.vreg() - self.ra2_env().vreg_offset;
             Reg::new_virtual(translate_to_rc(vreg.class()), idx as u32)
         } else {
             let idx = vreg.vreg();
-            self.rregs_by_preg_index[idx].to_reg()
+            self.ra2_env().rregs_by_preg_index[idx].to_reg()
         }
     }
 
@@ -963,7 +956,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     }
 
     fn num_vregs(&self) -> usize {
-        self.vreg_offset + self.func.get_num_vregs()
+        self.ra2_env().vreg_offset + self.func.get_num_vregs()
     }
 
     fn reftype_vregs(&self) -> &[regalloc2::VReg] {
@@ -971,7 +964,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     }
 
     fn is_pinned_vreg(&self, vreg: regalloc2::VReg) -> Option<regalloc2::PReg> {
-        if vreg.vreg() < self.vreg_offset {
+        if vreg.vreg() < self.ra2_env().vreg_offset {
             Some(regalloc2::PReg::new(vreg.vreg(), vreg.class()))
         } else {
             None
@@ -979,7 +972,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
     }
 
     fn pinned_vregs(&self) -> &[regalloc2::VReg] {
-        &self.pinned_vregs[..]
+        &self.ra2_env().pinned_vregs[..]
     }
 
     fn spillslot_size(&self, regclass: regalloc2::RegClass, _for_vreg: regalloc2::VReg) -> usize {
@@ -1019,32 +1012,33 @@ impl std::default::Default for Regalloc2Options {
     }
 }
 
-pub(crate) fn run<F: Function>(
+pub(crate) fn run<'a, F: Function>(
     func: &mut F,
-    rreg_universe: &RealRegUniverse,
+    env: &RegEnv,
     stackmap_info: Option<&StackmapRequestInfo>,
     run_checker: bool,
     opts: &Regalloc2Options,
 ) -> Result<RegAllocResult<F>, RegAllocError> {
-    let (ra2_func, env) = create_shim_and_env(func, rreg_universe, stackmap_info, opts)?;
+    let ra2_func = create_shim(func, env, stackmap_info, opts)?;
     let ra2_opts = regalloc2::RegallocOptions {
         // Only bother to collect info for verbose log messages if
         // we're running the checker (hence in a fuzzer or likely to
         // want to debug errors).
         verbose_log: run_checker,
     };
-    let result = regalloc2::run(&ra2_func, &env, &ra2_opts).map_err(|err| match err {
-        regalloc2::RegAllocError::CritEdge(from, to) => {
-            RegAllocError::Analysis(AnalysisError::CriticalEdge {
-                from: BlockIx::new(from.index() as u32),
-                to: BlockIx::new(to.index() as u32),
-            })
-        }
-        regalloc2::RegAllocError::EntryLivein => {
-            RegAllocError::Analysis(AnalysisError::EntryLiveinValues(vec![]))
-        }
-        _ => RegAllocError::Other(format!("{:?}", err)),
-    })?;
+    let result = regalloc2::run(&ra2_func, &env.regalloc2.as_ref().unwrap().env, &ra2_opts)
+        .map_err(|err| match err {
+            regalloc2::RegAllocError::CritEdge(from, to) => {
+                RegAllocError::Analysis(AnalysisError::CriticalEdge {
+                    from: BlockIx::new(from.index() as u32),
+                    to: BlockIx::new(to.index() as u32),
+                })
+            }
+            regalloc2::RegAllocError::EntryLivein => {
+                RegAllocError::Analysis(AnalysisError::EntryLiveinValues(vec![]))
+            }
+            _ => RegAllocError::Other(format!("{:?}", err)),
+        })?;
     log::info!("regalloc2 stats: {:?}", result.stats);
     finalize(ra2_func, result, run_checker)
 }
