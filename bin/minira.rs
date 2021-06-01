@@ -6,6 +6,7 @@ mod validator;
 
 use regalloc::{
     allocate_registers_with_opts, Algorithm, BacktrackingOptions, Function, IRSnapshot, Options,
+    RegEnv,
 };
 use test_framework::{make_universe, run_func, RunStage};
 use validator::check_results;
@@ -133,9 +134,10 @@ fn main() {
     let original_func = func.clone();
     let stackmap_request = func.get_stackmap_request();
 
+    let env = RegEnv::from_rru_and_opts(reg_universe.clone(), &opts);
     let result = match allocate_registers_with_opts(
         &mut func,
-        &reg_universe,
+        &env,
         stackmap_request.as_ref(),
         opts.clone(),
     ) {
