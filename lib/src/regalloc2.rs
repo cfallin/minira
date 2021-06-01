@@ -291,39 +291,9 @@ pub(crate) fn create_shim<'a, F: Function>(
             }
 
             moves += 1;
-            // Moves are handled slightly specially: we use a
-            // reused-input to force the move on our end to become a
-            // nop. regalloc2 will insert whatever moves are necessary
-            // as edits to make that work.
-
-            let src_policy = shim.translate_reg_to_policy(src);
-            let dst_policy = shim.translate_reg_to_policy(dst.to_reg());
-            let src_vreg = shim.translate_reg_to_vreg(src);
-            let dst_vreg = shim.translate_reg_to_vreg(dst.to_reg());
-            let src_policy = match src_policy {
-                regalloc2::OperandPolicy::Reg => regalloc2::OperandPolicy::Any,
-                x => x,
-            };
-            let dst_policy = if dst.to_reg().is_real() {
-                dst_policy
-            } else {
-                regalloc2::OperandPolicy::Reuse(0)
-            };
-            shim.operands.push(regalloc2::Operand::new(
-                src_vreg,
-                src_policy,
-                regalloc2::OperandKind::Use,
-                regalloc2::OperandPos::Before,
-            ));
-            shim.operands.push(regalloc2::Operand::new(
-                dst_vreg,
-                dst_policy,
-                regalloc2::OperandKind::Def,
-                regalloc2::OperandPos::After,
-            ));
-            let end = shim.operands.len();
-
-            shim.operand_ranges.push((start as u32, end as u32));
+            // Moves are handled specially by the regalloc. We don't
+            // need to generate any operands at all.
+            shim.operand_ranges.push((start as u32, start as u32));
             continue;
         }
 
@@ -614,6 +584,24 @@ fn edit_insn_registers<'a, F: Function>(
     Ok(())
 }
 
+fn handle_nop<'a, F: Function>(
+    shim: &Shim<'a, F>,
+    bix: BlockIx,
+    iix: InstIx,
+    checker: &mut Option<CheckerContext>,
+) -> Result<(), CheckerErrors> {
+    if let Some(checker) = checker.as_mut() {
+        let mapper = Mapper {
+            shim,
+            operands: &[],
+            allocs: &[],
+        };
+        let nop = shim.func.gen_zero_len_nop();
+        checker.handle_insn::<F, _>(&shim.env.rru, bix, iix, &nop, &mapper)?;
+    }
+    Ok(())
+}
+
 fn compute_insts_to_add<'a, F: Function>(
     shim: &Shim<'a, F>,
     out: &regalloc2::Output,
@@ -704,13 +692,9 @@ pub(crate) fn finalize<'a, F: Function>(
                 edit_idx += 1;
             }
 
-            // Edit the instruction.
-            //
-            // We skip moves because we handle them in a special way,
-            // by making the dest a reused input of the source. This
-            // effectively makes them a nop at the compatibility-shim
-            // level and forces regalloc2 to insert edits to move if
-            // bundles can't be merged.
+            // regalloc2 handles moves on its own -- we do not need to
+            // edit them here (and in fact it will fail, as there will
+            // be no corresponding operands).
             if shim.func.is_move(&insn).is_none() {
                 edit_insn_registers(
                     block,
@@ -724,6 +708,9 @@ pub(crate) fn finalize<'a, F: Function>(
                 .map_err(|err| RegAllocError::RegChecker(err))?;
                 orig_insn_map.push(iix);
                 new_insns.push(insn);
+            } else {
+                handle_nop(&shim, block, iix, &mut checker)
+                    .map_err(|err| RegAllocError::RegChecker(err))?;
             }
 
             let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i + 1));
@@ -926,14 +913,31 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
         if insn.index() == 0 {
             return None;
         }
-        let orig_insn = insn.index() - 1;
-        let inst = &self.func.insns()[orig_insn];
-        if self.func.is_move(inst).is_some() {
-            let ops = self.inst_operands(insn);
-            Some((ops[0], ops[1]))
-        } else {
-            None
-        }
+        let insn = insn.index() - 1;
+        let inst = &self.func.insns()[insn];
+        self.func
+            .is_move(inst)
+            .map(|(dst, src)| {
+                let src_policy = self.translate_reg_to_policy(src);
+                let dst_policy = self.translate_reg_to_policy(dst.to_reg());
+                let src_vreg = self.translate_reg_to_vreg(src);
+                let dst_vreg = self.translate_reg_to_vreg(dst.to_reg());
+                (
+                    regalloc2::Operand::new(
+                        src_vreg,
+                        src_policy,
+                        regalloc2::OperandKind::Use,
+                        regalloc2::OperandPos::Before,
+                    ),
+                    regalloc2::Operand::new(
+                        dst_vreg,
+                        dst_policy,
+                        regalloc2::OperandKind::Def,
+                        regalloc2::OperandPos::After,
+                    ),
+                )
+            })
+            .filter(|(dst, src)| dst.class() == src.class())
     }
 
     // --------------------------
