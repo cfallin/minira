@@ -440,6 +440,7 @@ pub(crate) enum Inst {
 #[derive(Debug)]
 pub(crate) struct Checker {
     bb_entry: BlockIx,
+    num_blocks: usize,
     bb_in: Map<BlockIx, CheckerState>,
     bb_succs: Map<BlockIx, Vec<BlockIx>>,
     bb_insts: Map<BlockIx, Vec<Inst>>,
@@ -502,6 +503,7 @@ impl Checker {
         let reftyped_vregs = reftyped_vregs.iter().cloned().collect::<FxHashSet<_>>();
         Checker {
             bb_entry: f.entry_block(),
+            num_blocks: f.blocks().len(),
             bb_in,
             bb_succs,
             bb_insts,
@@ -570,10 +572,16 @@ impl Checker {
     /// Perform the dataflow analysis to compute checker state at each BB entry.
     fn analyze(&mut self) {
         let mut queue = VecDeque::new();
-        queue.push_back(self.bb_entry);
+        let mut queue_set = FxHashSet::default();
+        for block in 0..self.num_blocks {
+            let block = BlockIx::new(block as u32);
+            queue.push_back(block);
+            queue_set.insert(block);
+        }
 
         while !queue.is_empty() {
             let block = queue.pop_front().unwrap();
+            queue_set.remove(&block);
             let mut state = self.bb_in.get(&block).cloned().unwrap();
             debug!("analyze: block {} has state {:?}", block.get(), state);
             for inst in self.bb_insts.get(&block).unwrap() {
@@ -600,7 +608,10 @@ impl Checker {
                         new_state
                     );
                     self.bb_in.insert(*succ, new_state);
-                    queue.push_back(*succ);
+                    if !queue_set.contains(succ) {
+                        queue.push_back(*succ);
+                        queue_set.insert(*succ);
+                    }
                 }
             }
         }
