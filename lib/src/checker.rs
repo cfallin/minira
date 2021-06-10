@@ -31,6 +31,7 @@
 //!     with allocated form                [ R_i := op R_j, R_k, ... ]
 //!
 //!       R[R_i] := `V_i`
+//!       forall R_other != R_i, R[R_other] = V_i: R[R_other] := bot
 //!
 //!     In other words, a statement, even after allocation, generates a symbol
 //!     that corresponds to its original virtual-register def.
@@ -343,6 +344,25 @@ impl CheckerState {
                     let orig = defs_orig[i];
                     let mapped = defs[i];
                     let reftyped = defs_reftyped[i];
+
+                    // For every other reg or spillslot with the
+                    // symbolic value, its value is no longer
+                    // up-to-date.
+                    for val in self.reg_values.values_mut() {
+                        if let CheckerValue::Reg(r, _) = *val {
+                            if r == orig {
+                                *val = CheckerValue::Conflicted;
+                            }
+                        }
+                    }
+                    for val in self.spill_slots.values_mut() {
+                        if let CheckerValue::Reg(r, _) = *val {
+                            if r == orig {
+                                *val = CheckerValue::Conflicted;
+                            }
+                        }
+                    }
+
                     self.reg_values
                         .insert(mapped, CheckerValue::Reg(orig, reftyped));
                 }
@@ -353,6 +373,7 @@ impl CheckerState {
                     .get(&from)
                     .cloned()
                     .unwrap_or(Default::default());
+
                 self.reg_values.insert(into.to_reg(), val);
             }
             &Inst::ChangeSpillSlotOwnership { slot, to_reg, .. } => {
@@ -370,6 +391,10 @@ impl CheckerState {
             &Inst::DefSlot { to_slot, for_reg } => {
                 self.spill_slots
                     .insert(to_slot, CheckerValue::Reg(for_reg, false));
+            }
+            &Inst::DefReg { to_reg, for_reg } => {
+                self.reg_values
+                    .insert(to_reg, CheckerValue::Reg(for_reg, false));
             }
             &Inst::Spill { into, from } => {
                 let val = self
@@ -420,6 +445,8 @@ pub(crate) enum Inst {
     },
     /// Similar to above, but just a def without a check. Used for regalloc2 checker.
     DefSlot { to_slot: SpillSlot, for_reg: Reg },
+    /// Similar to above, but for a reg dest.
+    DefReg { to_reg: RealReg, for_reg: Reg },
     /// A regular instruction with fixed use and def slots. Contains both
     /// the original registers (as given to the regalloc) and the allocated ones.
     Op {

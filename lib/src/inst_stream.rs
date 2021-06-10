@@ -111,13 +111,9 @@ impl InstToInsert {
                 from_reg,
                 to_reg,
             },
-            &InstToInsert::DefReg { to_reg, for_reg } => CheckerInst::Op {
-                inst_ix: InstIx::invalid_value(),
-                uses_orig: vec![],
-                uses: vec![],
-                defs_orig: vec![for_reg],
-                defs: vec![to_reg.to_reg()],
-                defs_reftyped: vec![false],
+            &InstToInsert::DefReg { to_reg, for_reg } => CheckerInst::DefReg {
+                to_reg: to_reg.to_reg(),
+                for_reg,
             },
             &InstToInsert::DefSlot { to_slot, for_reg } => {
                 CheckerInst::DefSlot { to_slot, for_reg }
