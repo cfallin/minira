@@ -20,7 +20,6 @@ pub(crate) struct Regalloc2Env {
     rregs_by_preg_index: Vec<RealReg>,
     pregs_by_rreg_index: Vec<regalloc2::PReg>,
     pinned_vregs: Vec<regalloc2::VReg>,
-    extra_scratch_by_class: Vec<regalloc2::PReg>,
     vreg_offset: usize,
 }
 
@@ -45,7 +44,6 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
     let mut preferred_regs_by_class = vec![vec![], vec![]];
     let mut non_preferred_regs_by_class = vec![vec![], vec![]];
     let mut scratch_by_class = vec![regalloc2::PReg::invalid(), regalloc2::PReg::invalid()];
-    let mut extra_scratch_by_class = vec![regalloc2::PReg::invalid(), regalloc2::PReg::invalid()];
 
     // For each reg in the RRU, create a PReg. Its hw_enc index is its
     // index in the class; note that we must have <= 32 regs per class
@@ -103,10 +101,6 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
             scratch_by_class[0] = preg;
         } else if rreg.get_index() == float_info.suggested_scratch.unwrap() {
             scratch_by_class[1] = preg;
-        } else if rreg.get_index() == int_info.suggested_scratch2.unwrap() {
-            extra_scratch_by_class[0] = preg;
-        } else if rreg.get_index() == float_info.suggested_scratch2.unwrap() {
-            extra_scratch_by_class[1] = preg;
         } else if rreg.get_index() < rru.allocable {
             match preg.class() {
                 regalloc2::RegClass::Int => {
@@ -137,8 +131,7 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
         "non_preferred_regs float: {:?}",
         non_preferred_regs_by_class[1]
     );
-    log::debug!("scratch1: {:?}", scratch_by_class);
-    log::debug!("scratch2: {:?}", extra_scratch_by_class);
+    log::debug!("scratch: {:?}", scratch_by_class);
 
     regs.sort_by_key(|preg| preg.index());
 
@@ -155,7 +148,6 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
         rregs_by_preg_index,
         pregs_by_rreg_index,
         pinned_vregs,
-        extra_scratch_by_class,
         vreg_offset,
     }
 }
@@ -263,8 +255,6 @@ pub(crate) fn create_shim<'a, F: Function>(
     let disallowed: SmallVec<[RealReg; 4]> = smallvec![
         shim.ra2_env().rregs_by_preg_index[shim.ra2_env().env.scratch_by_class[0].index()],
         shim.ra2_env().rregs_by_preg_index[shim.ra2_env().env.scratch_by_class[1].index()],
-        shim.ra2_env().rregs_by_preg_index[shim.ra2_env().extra_scratch_by_class[0].index()],
-        shim.ra2_env().rregs_by_preg_index[shim.ra2_env().extra_scratch_by_class[1].index()]
     ];
     log::debug!("disallowed: {:?}", disallowed);
 
@@ -470,33 +460,7 @@ fn edit_insts<'a, F: Function>(
             });
         }
     } else {
-        let rc = from.class();
-        let from = SpillSlot::new(from.as_stack().unwrap().index() as u32);
-        let to = SpillSlot::new(to.as_stack().unwrap().index() as u32);
-        let scratch = shim.ra2_env().rregs_by_preg_index
-            [shim.ra2_env().extra_scratch_by_class[rc as u8 as usize].index()];
-        if let Some(clobbers) = clobbers {
-            clobbers.insert(scratch);
-        }
-        if from != to {
-            ret.push(InstToInsert::Reload {
-                to_reg: Writable::from_reg(scratch),
-                from_slot: from,
-                for_vreg: None,
-            });
-            ret.push(InstToInsert::Spill {
-                to_slot: to,
-                from_reg: scratch,
-                for_vreg: None,
-            });
-        }
-        if let Some(to_vreg) = to_vreg {
-            let for_reg = shim.translate_vreg_to_reg(to_vreg);
-            ret.push(InstToInsert::DefSlot {
-                to_slot: to,
-                for_reg,
-            });
-        }
+        panic!("Slot-to-slot move impossible!");
     }
     ret
 }
@@ -975,7 +939,7 @@ impl<'a, F: Function> regalloc2::Function for Shim<'a, F> {
         &self.ra2_env().pinned_vregs[..]
     }
 
-    fn spillslot_size(&self, regclass: regalloc2::RegClass, _for_vreg: regalloc2::VReg) -> usize {
+    fn spillslot_size(&self, regclass: regalloc2::RegClass) -> usize {
         let regclass = match regclass {
             regalloc2::RegClass::Int => RegClass::I64,
             regalloc2::RegClass::Float => RegClass::V128,
