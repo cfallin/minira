@@ -155,7 +155,7 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
 pub(crate) fn create_shim<'a, F: Function>(
     func: &'a mut F,
     env: &'a RegEnv,
-    _sri: Option<&StackmapRequestInfo>,
+    sri: Option<&StackmapRequestInfo>,
     opts: &Regalloc2Options,
 ) -> Result<Shim<'a, F>, RegAllocError> {
     let mut shim = Shim {
@@ -390,8 +390,17 @@ pub(crate) fn create_shim<'a, F: Function>(
         moves
     );
 
-    // Compute safepoint map.
-    // TODO
+    // Compute safepoint map and reftyped-vregs list.
+    if let Some(sri) = sri {
+        for insn in &sri.safepoint_insns {
+            let ra2_insn = insn.get() as usize + 1;
+            shim.safepoints.set(ra2_insn, true);
+        }
+        for vreg in &sri.reftyped_vregs {
+            let vreg = shim.translate_virtualreg_to_vreg(*vreg);
+            shim.reftype_vregs.push(vreg);
+        }
+    }
 
     Ok(shim)
 }
@@ -629,18 +638,22 @@ pub(crate) fn finalize<'a, F: Function>(
     let mut new_insns = vec![];
     let nop = shim.func.gen_zero_len_nop();
     let mut edit_idx = 0;
+    let mut safepoint_list_idx = 0;
     let mut target_map: TypedIxVec<BlockIx, InstIx> = TypedIxVec::new();
     let mut orig_insn_map: TypedIxVec<InstIx, InstIx> = TypedIxVec::new();
+    let mut new_safepoint_insns: Vec<InstIx> = vec![];
+    let mut stackmaps: Vec<Vec<SpillSlot>> = vec![];
     let mut clobbers = Set::empty();
 
     for block in shim.func.blocks() {
         target_map.push(InstIx::new(new_insns.len() as u32));
         for iix in shim.func.block_insns(block) {
             let i = iix.get() as usize;
+            // i + 1 because of entry inst.
+            let ra2_inst = regalloc2::Inst::new(i + 1);
             let mut insn = std::mem::replace(&mut shim.func.insns_mut()[i], nop.clone());
 
-            // i + 1 because of entry inst.
-            let pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i + 1));
+            let pos = regalloc2::ProgPoint::before(ra2_inst);
             while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
                 match &out.edits[edit_idx].1 {
                     &regalloc2::Edit::Move { from, to, .. } => {
@@ -677,6 +690,30 @@ pub(crate) fn finalize<'a, F: Function>(
                     .map_err(|err| RegAllocError::RegChecker(err))?;
             }
 
+            if shim.safepoints.get(ra2_inst.index()) {
+                new_safepoint_insns.push(InstIx::new((new_insns.len() - 1) as u32));
+                let pt = regalloc2::ProgPoint::before(ra2_inst);
+                log::debug!(
+                    " -> inst {:?} is safepoint; looking for slots at pt {:?}",
+                    ra2_inst,
+                    pt
+                );
+                let mut slots = vec![];
+                if safepoint_list_idx < out.safepoint_slots.len() {
+                    assert!(out.safepoint_slots[safepoint_list_idx].0 >= pt);
+                }
+                while safepoint_list_idx < out.safepoint_slots.len()
+                    && out.safepoint_slots[safepoint_list_idx].0 == pt
+                {
+                    slots.push(SpillSlot::new(
+                        out.safepoint_slots[safepoint_list_idx].1.index() as u32,
+                    ));
+                    log::debug!(" -> slot: {:?}", slots.last().unwrap());
+                    safepoint_list_idx += 1;
+                }
+                stackmaps.push(slots);
+            }
+
             let pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i + 1));
             while edit_idx < out.edits.len() && out.edits[edit_idx].0 <= pos {
                 assert_eq!(out.edits[edit_idx].0, pos);
@@ -710,8 +747,8 @@ pub(crate) fn finalize<'a, F: Function>(
         clobbered_registers: clobbers,
         num_spill_slots: out.num_spillslots as u32,
         block_annotations: None,
-        stackmaps: vec![],
-        new_safepoint_insns: vec![],
+        stackmaps,
+        new_safepoint_insns,
     })
 }
 
