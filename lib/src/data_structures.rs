@@ -1253,10 +1253,6 @@ pub struct RegClassInfo {
     // a register for various maneuvers, for example a spillslot-to-spillslot
     // move when no (other) registers are free.
     pub suggested_scratch: Option<usize>,
-
-    // Another register, if any, that is *guaranteed* not to be
-    // used. Some algorithms require two scratch registers.
-    pub suggested_scratch2: Option<usize>,
 }
 
 impl RealRegUniverse {
@@ -1360,7 +1356,6 @@ impl RealRegUniverse {
                         first,
                         last,
                         suggested_scratch,
-                        suggested_scratch2,
                     }) => {
                         if !regclass_used[rc] {
                             ok = false;
@@ -1376,11 +1371,6 @@ impl RealRegUniverse {
                         }
                         if ok {
                             if let Some(s) = suggested_scratch {
-                                if s < first || s > last {
-                                    ok = false;
-                                }
-                            }
-                            if let Some(s) = suggested_scratch2 {
                                 if s < first || s > last {
                                     ok = false;
                                 }
