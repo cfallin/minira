@@ -21,6 +21,12 @@ pub(crate) struct Regalloc2Env {
     pregs_by_rreg_index: Vec<regalloc2::PReg>,
     pinned_vregs: Vec<regalloc2::VReg>,
     vreg_offset: usize,
+    // regalloc2 uses only Float and Int classes. If the regalloc.rs
+    // client uses F64, we map that to Float; otherwise, V128 maps to
+    // Float. We don't support the case where both regalloc.rs classes
+    // are used. This is sufficient to cover existing use-cases until
+    // they can migrate directly to regalloc2.
+    float_regclass: RegClass,
 }
 
 pub(crate) struct Shim<'a, F: Function> {
@@ -53,7 +59,15 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
     assert_eq!(crate::NUM_REG_CLASSES, 5);
     assert!(rru.allocable_by_class[RegClass::rc_to_usize(RegClass::I32)].is_none());
     assert!(rru.allocable_by_class[RegClass::rc_to_usize(RegClass::F32)].is_none());
-    assert!(rru.allocable_by_class[RegClass::rc_to_usize(RegClass::F64)].is_none());
+
+    let float_regclass = if rru.allocable_by_class[RegClass::rc_to_usize(RegClass::V128)].is_some()
+    {
+        assert!(rru.allocable_by_class[RegClass::rc_to_usize(RegClass::F64)].is_none());
+        RegClass::V128
+    } else {
+        assert!(rru.allocable_by_class[RegClass::rc_to_usize(RegClass::V128)].is_none());
+        RegClass::F64
+    };
 
     // PReg is limited to 64 (32 int, 32 float) regs due to
     // bitpacking, so just build full lookup tables in both
@@ -66,7 +80,7 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
         .as_ref()
         .unwrap();
     assert!(int_info.suggested_scratch.is_some());
-    let float_info = rru.allocable_by_class[RegClass::rc_to_usize(RegClass::V128)]
+    let float_info = rru.allocable_by_class[RegClass::rc_to_usize(float_regclass)]
         .as_ref()
         .unwrap();
     assert!(float_info.suggested_scratch.is_some());
@@ -80,7 +94,7 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
                 int_idx += 1;
                 regalloc2::PReg::new(i, regalloc2::RegClass::Int)
             }
-            RegClass::V128 => {
+            x if x == float_regclass => {
                 let i = float_idx;
                 float_idx += 1;
                 regalloc2::PReg::new(i, regalloc2::RegClass::Float)
@@ -149,6 +163,7 @@ pub(crate) fn build_machine_env(rru: &RealRegUniverse, opts: &Regalloc2Options) 
         pregs_by_rreg_index,
         pinned_vregs,
         vreg_offset,
+        float_regclass,
     }
 }
 
@@ -752,18 +767,20 @@ pub(crate) fn finalize<'a, F: Function>(
     })
 }
 
-fn translate_rc(rc: RegClass) -> regalloc2::RegClass {
-    match rc {
-        RegClass::I64 => regalloc2::RegClass::Int,
-        RegClass::V128 => regalloc2::RegClass::Float,
-        _ => unimplemented!("Only I64 and V128 regclasses are used"),
+impl Regalloc2Env {
+    fn translate_rc(&self, rc: RegClass) -> regalloc2::RegClass {
+        match rc {
+            RegClass::I64 => regalloc2::RegClass::Int,
+            x if x == self.float_regclass => regalloc2::RegClass::Float,
+            _ => unimplemented!("Only I64 and V128 regclasses are used"),
+        }
     }
-}
 
-fn translate_to_rc(rc: regalloc2::RegClass) -> RegClass {
-    match rc {
-        regalloc2::RegClass::Int => RegClass::I64,
-        regalloc2::RegClass::Float => RegClass::V128,
+    fn translate_to_rc(&self, rc: regalloc2::RegClass) -> RegClass {
+        match rc {
+            regalloc2::RegClass::Int => RegClass::I64,
+            regalloc2::RegClass::Float => self.float_regclass,
+        }
     }
 }
 
@@ -783,7 +800,7 @@ impl<'a, F: Function> Shim<'a, F> {
 
     fn translate_virtualreg_to_vreg(&self, reg: VirtualReg) -> regalloc2::VReg {
         let rc = reg.get_class();
-        let trc = translate_rc(rc);
+        let trc = self.ra2_env().translate_rc(rc);
         regalloc2::VReg::new(reg.get_index() + self.ra2_env().vreg_offset, trc)
     }
 
@@ -798,7 +815,7 @@ impl<'a, F: Function> Shim<'a, F> {
     fn translate_vreg_to_reg(&self, vreg: regalloc2::VReg) -> Reg {
         if vreg.vreg() >= self.ra2_env().vreg_offset {
             let idx = vreg.vreg() - self.ra2_env().vreg_offset;
-            Reg::new_virtual(translate_to_rc(vreg.class()), idx as u32)
+            Reg::new_virtual(self.ra2_env().translate_to_rc(vreg.class()), idx as u32)
         } else {
             let idx = vreg.vreg();
             self.ra2_env().rregs_by_preg_index[idx].to_reg()
